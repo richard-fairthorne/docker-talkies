@@ -26,6 +26,9 @@ Need stereo speaker diarization? Pass `diarization=true` and upload a stereo fil
   - [Long files + VAD chunking](#long-files--vad-chunking)
   - [Error contract](#error-contract)
 - [Resource-management endpoints (Ollama-style)](#resource-management-endpoints-ollama-style)
+- [Server-side file staging (`/v1/files`)](#server-side-file-staging-v1files)
+- [MCP endpoint (`/v1/mcp`)](#mcp-endpoint-v1mcp)
+- [Bearer-token auth](#bearer-token-auth)
 - [Configuration (env vars)](#configuration-env-vars)
 - [CPU vs CUDA images](#cpu-vs-cuda-images)
 - [Architecture](#architecture)
@@ -115,7 +118,7 @@ A short list of things that look like they might work but don't, so you don't wa
 | **Per-request translation task selection** | Not supported via API | The `task` (`asr` vs `s2t_translation`) and `target_lang` are baked into the model slug via `models.json`'s `default_task` / `default_target_lang`. To enable translation you add a custom slug — see [Translation](#translation-canary-xy). |
 | **Multiple models resident at once** | Not supported in one container | Every transcription request evicts other loaded models (sibling eviction) so VRAM/RAM doesn't get split. If you genuinely need two models simultaneously, run two containers. |
 | **arm64 / aarch64** | Not built | `linux/amd64` only. `nemo_toolkit[asr]` + the rest of the chain doesn't currently resolve cleanly on arm64 at the pinned versions. |
-| **`canary-qwen-2.5b` on long audio** | First VAD region only | The SALM decoder doesn't support per-chunk timeline stitching cleanly. Long files get truncated to the first ≤28s VAD region. Use it on short clips only. |
+| **`canary-qwen-2.5b` timestamps** | Not produced | The SALM head has no alignment output, so `verbose_json` comes back with `segments: []` and `words: []`, and `srt` / `vtt` fall back to a single full-duration cue. Transcription itself still covers the whole file — long inputs are VAD-chunked and the per-chunk text is concatenated. |
 | **Files > 100 MB** | 413 error by default | Configurable via `TALKIES_MAX_UPLOAD_BYTES`. Bump it for long lectures / podcasts. |
 | **Custom Canary prompts** | Not supported | NeMo's Canary prompt format (`<\|spltoken\|>`, source/target tokens) isn't exposed to callers. You get the prompt the backend builds from `source_lang`/`target_lang`/`task`. |
 | **Speaker identification beyond stereo channels** | Not supported | There's no voice clustering / speaker-embedding model in here. "Diarization" means "two-channel split", not "figure out who's talking from the audio". |
@@ -130,7 +133,8 @@ Multipart form. Same field names as OpenAI's transcription endpoint where they o
 
 | Field | Required | Default | Notes |
 |---|---|---|---|
-| `file` | yes | — | Audio file (any format that ffmpeg can decode — WAV, MP3, M4A, FLAC, OGG, WebM, Opus, MP4 audio track, etc.). Capped at `TALKIES_MAX_UPLOAD_BYTES` (default 100 MB). |
+| `file` | one of `file`/`file_path` | — | Audio file (any format that ffmpeg can decode — WAV, MP3, M4A, FLAC, OGG, WebM, Opus, MP4 audio track, etc.). Capped at `TALKIES_MAX_UPLOAD_BYTES` (default 100 MB). |
+| `file_path` | one of `file`/`file_path` | — | Either (a) a server-side path of a file previously uploaded via `PUT /v1/files/{path}` — leading `/` is stripped, traversal segments are rejected — or (b) an `http://` / `https://` URL, which is downloaded once into `${TALKIES_DATA_DIR}/files/downloads/` and cached for subsequent requests (same URL = cache hit, no re-download). The `TALKIES_MAX_UPLOAD_BYTES` cap doesn't apply; URL downloads are capped separately via `TALKIES_MAX_DOWNLOAD_BYTES` (default 1 GiB). See [Server-side file staging](#server-side-file-staging-v1files). |
 | `model` | yes | — | One of the configured slugs (see `GET /v1/models`). Unknown slug → 404. |
 | `language` | no | model default | ISO-639-1 language code. Whisper auto-detects when omitted; Canary multilingual uses its `default_source_lang` from `models.json` (English unless overridden). |
 | `response_format` | no | `json` | `json` / `text` / `verbose_json` / `srt` / `vtt`. See [Response formats](#response-formats). |
@@ -311,7 +315,7 @@ Anything longer than `TALKIES_VAD_CHUNK_THRESHOLD_SECONDS` (default 30s) gets sl
 2. VAD-aligned cuts produce noticeably better segment boundaries on real-world audio than fixed 30-second window slides.
 3. Timestamps are re-assembled by offsetting each chunk's segment/word timings by the chunk's start in the source timeline, so you get one continuous `segments` list spanning the whole file.
 
-Canary SALM (`canary-qwen-2.5b`) is the exception — its decoder is a Qwen2 LLM that doesn't support per-chunk timeline stitching cleanly, so it processes only the **first** VAD-detected speech region. Use it for short clips (≤30s) or expect truncation on long files.
+Canary SALM (`canary-qwen-2.5b`) is the partial exception — same VAD chunker, but because the SALM head has no alignment output, the per-chunk results are concatenated as plain text (with a single space) instead of being stitched into a `segments` timeline. You still get the full transcript on long files; you just don't get per-segment timestamps for this one model.
 
 ### Error contract
 
@@ -341,13 +345,14 @@ Two response shapes — application errors return `{"detail": "..."}` with a hum
 | Status | Shape | When |
 |---|---|---|
 | 200 | per `response_format` | success |
-| 400 | string | bad audio (ffmpeg conversion failure, unsupported codec, corrupted file), mono input with `diarization=true`, >2 channels with `diarization=true` |
-| 404 | string | unknown model slug in `model` field, unknown model in `DELETE /api/ps/{model_id}`, model in DELETE path is configured but not currently loaded |
-| 413 | string | upload exceeded `TALKIES_MAX_UPLOAD_BYTES` |
-| 422 | array | Pydantic validation (missing `file` or `model`, wrong field types, malformed `timestamp_granularities[]`) |
+| 400 | string | bad audio (ffmpeg conversion failure, unsupported codec, corrupted file), mono input with `diarization=true`, >2 channels with `diarization=true`, neither or both of `file`/`file_path` set, invalid `/v1/files` path (null bytes, backslashes, `.` / `..` segments, double slashes), URL download failure (DNS, HTTP 4xx/5xx, unsupported scheme, no host, too many redirects, size exceeded `TALKIES_MAX_DOWNLOAD_BYTES`, blocked by SSRF guard when `TALKIES_BLOCK_PRIVATE_DOWNLOADS=true`) |
+| 401 | string | only emitted when `TALKIES_AUTH_TOKEN` is set: missing / malformed / wrong bearer token. Response includes `WWW-Authenticate: Bearer`. |
+| 404 | string | unknown model slug in `model` field, unknown model in `DELETE /api/ps/{model_id}`, model in DELETE path is configured but not currently loaded, `file_path` references a missing file, `/v1/files/{path}` GET or DELETE on a non-existent file |
+| 413 | string | upload exceeded `TALKIES_MAX_UPLOAD_BYTES` (applies to `POST /v1/audio/transcriptions` multipart `file` and `PUT /v1/files/{path}` body; **not** to `file_path`-driven transcribe) |
+| 422 | array | Pydantic validation (missing required fields, wrong field types, malformed `timestamp_granularities[]`) |
 | 500 | string | unhandled backend exception (NeMo / faster-whisper / torch internal failure) |
 
-There is no 401/403 — talkies has no built-in auth. Stick it behind a reverse proxy (Caddy, Traefik, nginx, your VPN's auth gateway) if you want authentication. The endpoint has no rate limiting either, for the same reason.
+Auth: set `TALKIES_AUTH_TOKEN` to require a bearer token on every route (see [Bearer-token auth](#bearer-token-auth)). Without it, every endpoint is open — stick the container behind a reverse proxy (Caddy, Traefik, nginx, your VPN's auth gateway) if you don't want the built-in token. There's no built-in rate limiting either; that's a reverse-proxy concern.
 
 ## Resource-management endpoints (Ollama-style)
 
@@ -365,19 +370,131 @@ Behind these endpoints there's an **idle sweeper** that runs on a `TALKIES_SWEEP
 
 There's also **sibling eviction at transcription time**: when a request arrives and a model that isn't the requested one is currently loaded, the other model gets unloaded first. All seven models compete for the same VRAM (or the same fat slice of RAM on CPU), so loading two at once on a 12GB card OOMs you. Ollama does this implicitly via its scheduler; we do it explicitly per-request. If you genuinely want two models resident simultaneously, you want two containers.
 
+## Server-side file staging (`/v1/files`)
+
+If you're going to transcribe the same recording multiple times (different `response_format`, different model, re-runs while you tweak something else) it gets annoying re-uploading the same bytes on every call. The `/v1/files` API lets you stage a file on the server once, then reference it by relative path in `/v1/audio/transcriptions` via the `file_path` form field.
+
+Files land under `${TALKIES_DATA_DIR}/files/<path>`. The path you supply in the URL is treated as relative to that root — `/foo/bar/clip.mp3` and `foo/bar/clip.mp3` both end up at `${TALKIES_DATA_DIR}/files/foo/bar/clip.mp3`. Parent directories are created on PUT and pruned (only the empty ones, only up to but not including the root) on DELETE.
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /v1/files` | List every staged file. Returns `{"files": [{"path": "...", "size": N, "modified": "...Z"}]}`, sorted by path. |
+| `PUT /v1/files/{path}` | Upload raw bytes (no multipart wrapper — `--data-binary @local-file`). Capped at `TALKIES_MAX_UPLOAD_BYTES`. Written atomically (`.part` tmp file → rename). Overwrites any existing file at the same path. Returns 201 with `{"path": "...", "size": N}`. |
+| `GET /v1/files/{path}` | Streams the file back. Content-Type guessed from the extension (`.mp3` → `audio/mpeg`, `.wav` → `audio/wav`, etc.); falls back to `application/octet-stream`. 404 if missing. |
+| `DELETE /v1/files/{path}` | Removes the file and prunes empty parent directories up to the root. 404 if missing. |
+
+```bash
+# Stage the file once.
+curl -X PUT --data-binary @lecture.mp3 \
+  -H "Content-Type: audio/mpeg" \
+  http://localhost:8000/v1/files/lectures/2026-03-15/lecture.mp3
+
+# Reuse it across multiple transcribe calls — no re-upload.
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file_path=lectures/2026-03-15/lecture.mp3" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "response_format=verbose_json" | jq
+
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file_path=lectures/2026-03-15/lecture.mp3" \
+  -F "model=canary-1b-flash" \
+  -F "response_format=srt" > lecture.srt
+
+# List what's there.
+curl -s http://localhost:8000/v1/files | jq
+
+# Delete when done.
+curl -X DELETE http://localhost:8000/v1/files/lectures/2026-03-15/lecture.mp3
+```
+
+Path safety rules: null bytes, backslashes, `.` segments, `..` segments and double slashes are all rejected with 400. After lexical validation the resolved absolute path is required to remain inside `${TALKIES_DATA_DIR}/files/` — symlinks pointing outside the root are caught here and refused. Symlinks themselves are not followed for GET / DELETE (a symlink at a request path returns 404 as if no file is there).
+
+Transcribe requests must specify exactly one of `file` or `file_path`. Passing both or neither returns 400. The `TALKIES_MAX_UPLOAD_BYTES` cap does **not** apply to `file_path` — the file is already on disk, you put it there.
+
+### Pulling from a URL
+
+`file_path` also accepts an `http://` or `https://` URL. First request downloads the bytes into `${TALKIES_DATA_DIR}/files/downloads/<sha256(url)[:16]>-<safe-basename>` and runs the transcription off that cached file. Subsequent requests with the same URL skip the download entirely. Two concurrent requests for the same URL won't double-fetch — the second waiter sees the cache hit after the first finishes.
+
+```bash
+# First call downloads, transcribes off the cached copy.
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file_path=https://example.com/podcasts/ep-042.mp3" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "response_format=verbose_json" | jq
+
+# Second call hits the cache — same URL, no re-download.
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file_path=https://example.com/podcasts/ep-042.mp3" \
+  -F "model=canary-1b-flash" \
+  -F "response_format=srt" > ep-042.srt
+```
+
+Downloads land in `downloads/` under the files root, so `GET /v1/files` lists them alongside your uploads and `DELETE /v1/files/downloads/<key>` invalidates a single cached entry. The cache key is a 16-char prefix of `sha256(url)`, suffixed with a safe basename from the URL path so listings stay readable.
+
+Constraints applied during the download:
+
+- Size: streamed to disk with a per-download cap from `TALKIES_MAX_DOWNLOAD_BYTES` (default 1 GiB). Exceeding the cap aborts and removes the partial file.
+- Redirects: followed manually, capped at 5 hops, with the SSRF guard re-applied at every hop.
+- Timeouts: 10 s connect, 300 s read per response chunk.
+- SSRF: off by default (LAN-fetch is the common self-hosted case). Set `TALKIES_BLOCK_PRIVATE_DOWNLOADS=true` to reject URLs whose hostname resolves to private / loopback / link-local / multicast / reserved IPs — handy if you're exposing the server to untrusted clients on a network where it can reach metadata endpoints or internal services.
+
+## MCP endpoint (`/v1/mcp`)
+
+talkies speaks the [Model Context Protocol](https://modelcontextprotocol.io) over a Streamable HTTP transport at `/v1/mcp`. Point an MCP-aware agent (Claude Code, Claude Desktop, MCP Inspector, anything that supports the streamable-http transport) at `http://<host>:8000/v1/mcp` and it gets six tools for free:
+
+| Tool | What it does |
+|---|---|
+| `list_models` | Discover available ASR slugs (returns `[{slug, executor, default_source_lang, default_target_lang, default_task, loaded}]`). |
+| `transcribe` | Run ASR on a `file_path` — either an `http(s)://` URL (downloaded + cached server-side) or a path under the staging area. Args: `model`, `language?`, `response_format?` (`json`/`verbose_json`/`text`/`srt`/`vtt`), `diarization?`. JSON formats return a JSON-encoded string; text/srt/vtt return raw. |
+| `list_files` | Same payload as `GET /v1/files`. |
+| `put_file` | Upload to the staging area. Body is base64-encoded (`content_base64`), decoded size capped at `TALKIES_MAX_UPLOAD_BYTES`. For big files, prefer `PUT /v1/files/{path}` over HTTP — JSON-RPC + base64 chews token budget. |
+| `get_file` | Read a staged file as base64. Same size cap. Same advice — for big bytes, hit `GET /v1/files/{path}` over HTTP instead. |
+| `delete_file` | Remove a staged file, prune empty parents up to (but not including) the root. |
+
+Wire it into Claude Code:
+
+```bash
+claude mcp add --transport http talkies http://localhost:8000/v1/mcp
+```
+
+If `TALKIES_AUTH_TOKEN` is set, the client must send `Authorization: Bearer <token>` — Claude Code supports this via `--header`:
+
+```bash
+claude mcp add --transport http talkies http://localhost:8000/v1/mcp \
+  --header "Authorization: Bearer <your-token>"
+```
+
+The MCP server runs over the same FastAPI process, shares `BACKENDS` / `REGISTRY` with the HTTP routes, and goes through the same auth middleware. Sibling-eviction and idle-unload work identically — a model loaded by the MCP `transcribe` tool is the same instance the HTTP endpoint sees.
+
+## Bearer-token auth
+
+Set `TALKIES_AUTH_TOKEN` to gate every route — `/v1/audio/transcriptions`, `/v1/files/*`, `/v1/mcp`, the resource-management endpoints. Requests without `Authorization: Bearer <token>` get 401 with `WWW-Authenticate: Bearer`. `/healthz` and CORS preflights (`OPTIONS`) are exempt so probes + browser clients keep working.
+
+```bash
+# Server side:
+docker run -p 8000:8000 -e TALKIES_AUTH_TOKEN=$(openssl rand -hex 32) \
+  -v $PWD/data:/data psyb0t/talkies:latest
+
+# Client side:
+curl -H "Authorization: Bearer <token>" http://localhost:8000/v1/models
+```
+
+If you don't set the env var (or set it to an empty string), talkies stays wide open — that's the historical default and matches what self-hosted deployments behind a private network expect. The token is checked with `hmac.compare_digest`, so timing-side-channel leak is bounded. Keep the token out of URLs, query strings, and logs (talkies doesn't log it; your reverse proxy might — check there).
+
 ## Configuration (env vars)
 
 | Var | Default | What it does |
 |---|---|---|
-| `TALKIES_HOST` | `0.0.0.0` | uvicorn bind host. Set to `127.0.0.1` if you're behind a reverse proxy on the same host and don't want network exposure. |
-| `TALKIES_PORT` | `8000` | uvicorn bind port. |
+| `TALKIES_AUTH_TOKEN` | (empty = no auth) | Bearer token required on every route except `/healthz`. Unset / empty leaves the server wide open (existing behaviour). When set, every HTTP request and every MCP call must include `Authorization: Bearer <token>` or it returns 401. |
 | `TALKIES_DEVICE` | `auto` (in entrypoint) / `cpu` / `cuda` (per-image default) | `auto` picks `cuda` if available else `cpu`. Pin to a specific GPU with `cuda:N`. |
 | `TALKIES_MODELS_FILE` | `/app/models.json` | Path to the model registry JSON. Override to ship a custom subset (e.g. only Whisper-turbo if you only care about that one model). |
-| `TALKIES_DATA_DIR` | `/data` | Base data dir. Model snapshots land in `$TALKIES_DATA_DIR/models/<slug>/` as flat per-model directories (no HF cache layout). Bind-mount this to persist weights across restarts. |
+| `TALKIES_DATA_DIR` | `/data` | Base data dir. Model snapshots land in `$TALKIES_DATA_DIR/models/<slug>/` as flat per-model directories (no HF cache layout); staged uploads from `/v1/files` land under `$TALKIES_DATA_DIR/files/`. Bind-mount this to persist both across restarts. |
 | `TALKIES_MODEL_TTL` | `600` (10 min) | Idle time before a loaded backend is unloaded by the sweeper. Bare number = seconds; also accepts Go-style `3h30m5s`, `45m`, `90s`. `0` disables auto-unload. |
 | `TALKIES_SWEEPER_INTERVAL` | `60` | How often the sweeper checks for idle models (seconds; same Go-style parsing). |
 | `TALKIES_LOAD_TIMEOUT` | `300` | Per-model load timeout (seconds; same Go-style parsing). Initial weights download + warmup runs inside this budget. |
-| `TALKIES_MAX_UPLOAD_BYTES` | `104857600` (100 MB) | Reject uploads larger than this with 413. Bump for long lectures / podcasts. |
+| `TALKIES_MAX_UPLOAD_BYTES` | `104857600` (100 MB) | Reject uploads larger than this with 413. Bump for long lectures / podcasts. Applies to `POST /v1/audio/transcriptions` (`file` field) and `PUT /v1/files/{path}` only. |
+| `TALKIES_MAX_DOWNLOAD_BYTES` | `1073741824` (1 GiB) | Abort URL downloads (when `file_path` is an http(s) URL) larger than this. Bigger default than the upload cap because downloads stream straight to disk, no in-memory buffering. |
+| `TALKIES_BLOCK_PRIVATE_DOWNLOADS` | `false` | Set to `true` to refuse URL downloads whose hostname resolves to private / loopback / link-local / multicast / reserved IPs. Default `false` because the typical self-hosted deployment is a LAN box fetching from another LAN box. Flip to `true` if the server's exposed to untrusted clients. |
 | `TALKIES_ENABLED_MODELS` | (empty = all from models.json) | Comma-separated slugs whitelist. Restricts both the boot-time snapshot download and the queryable surface of `/v1/models`. Unknown slugs fail fast on startup. Leave empty to enable every model in `models.json` (heavy on first boot — the CUDA image's full set is ~12 GB on disk). |
 | `TALKIES_PRELOAD` | (empty) | Comma-separated slugs to load into RAM/VRAM at boot, before uvicorn accepts requests. Skips the cold-load penalty on the first transcription. Must be a subset of `TALKIES_ENABLED_MODELS` (or any slug from `models.json` when that's empty). |
 | `TALKIES_VAD_CHUNK_THRESHOLD` | `30.0` | Audio longer than this (seconds) goes through VAD chunking. Shorter clips are sent to the backend whole. |
@@ -548,7 +665,7 @@ CPU isn't supported as a test target on purpose — whisper-large-v3 on a deskto
 - `[tool.uv] exclude-newer` in `pyproject.toml` refuses to install package versions newer than the gate date — blocks same-day supply-chain attacks at lockfile generation time.
 - Container runs as non-root user `talkies` (uid 1000). `/data` is the only writable mount target.
 - `HF_HUB_OFFLINE=1` is the production default — once weights are cached on disk, the container has no reason to call out to HuggingFace. The entrypoint's prefetch step transparently unsets this for the snapshot-download sub-shell only; the server process itself runs offline. So in steady state (after the first boot) talkies never reaches the internet.
-- No built-in authentication. If you expose this to a network that isn't trusted, put it behind a reverse proxy that does auth + rate limiting. talkies binds to `0.0.0.0` by default for container-network friendliness; flip `TALKIES_HOST=127.0.0.1` if you're proxying on the same host.
+- Optional built-in bearer-token auth via `TALKIES_AUTH_TOKEN` (see [Bearer-token auth](#bearer-token-auth)). Default-off — set the env var to require `Authorization: Bearer <token>` on every route (HTTP API and MCP). The server binds to `0.0.0.0:8000` inside the container — control network exposure at `docker run` time (`-p 127.0.0.1:8000:8000` for loopback-only on the host, `-p 8000:8000` for all interfaces). For untrusted networks, combine the token with a reverse proxy doing TLS termination + rate limiting.
 
 Open CVEs against the pinned `torch` / `transformers` / `nemo-toolkit` versions are threat-modelled in the Dockerfile.cuda header comments — short version, talkies never calls `torch.load()` on untrusted files (weights come from hardcoded HF org repos via `snapshot_download`), never instantiates `Trainer` (inference only), and never runs the per-model conversion paths flagged by the transformers advisories. If you point `TALKIES_DATA_DIR` at a directory containing **arbitrary user-provided model weights**, you're on your own — talkies' auto-fetch only writes to `$TALKIES_DATA_DIR/models/<slug>/` from the hardcoded HuggingFace repo ids in `models.json`.
 

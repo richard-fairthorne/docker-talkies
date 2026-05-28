@@ -3,14 +3,12 @@
 # directory layout, then execs the server.
 set -eu
 
-: "${TALKIES_HOST:=0.0.0.0}"
-: "${TALKIES_PORT:=8000}"
 : "${TALKIES_DEVICE:=auto}"
 : "${TALKIES_MODELS_FILE:=/app/models.json}"
 : "${TALKIES_DATA_DIR:=/data}"
 : "${TALKIES_ENABLED_MODELS:=}"
 
-export TALKIES_HOST TALKIES_PORT TALKIES_DEVICE
+export TALKIES_DEVICE
 export TALKIES_MODELS_FILE TALKIES_DATA_DIR
 export TALKIES_ENABLED_MODELS
 

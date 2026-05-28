@@ -26,6 +26,8 @@ dependencies = [
     "uvicorn==0.47.0",
     "pydantic==2.13.4",
     "python-multipart==0.0.20",
+    "httpx==0.28.1",
+    "mcp==1.27.1",
 ]
 
 [project.urls]
@@ -39,4 +41,4 @@ build-backend = "hatchling.build"
 packages = ["src/talkies"]
 
 [tool.uv]
-exclude-newer = "2026-05-27T00:00:00Z"
+exclude-newer = "2026-05-28T00:00:00Z"

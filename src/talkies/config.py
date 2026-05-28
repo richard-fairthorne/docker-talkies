@@ -64,8 +64,11 @@ def _duration_env(name: str, default: float) -> float:
     return hours * 3600 + minutes * 60 + seconds
 
 
-HOST: str = os.environ.get("TALKIES_HOST", "0.0.0.0")
-PORT: int = _int_env("TALKIES_PORT", 8000)
+# Optional bearer token gating every HTTP route (including /v1/mcp).
+# Empty/unset = wide open (current default). When set, every request must
+# carry `Authorization: Bearer <token>` or it gets 401. /healthz stays
+# unauthenticated so k8s / docker probes keep working.
+AUTH_TOKEN: str = os.environ.get("TALKIES_AUTH_TOKEN", "").strip()
 
 DEVICE: str = os.environ.get("TALKIES_DEVICE", "auto").strip() or "auto"
 if DEVICE not in ("auto", "cpu", "cuda") and not DEVICE.startswith("cuda:"):
@@ -87,18 +90,42 @@ DATA_DIR: Path = Path(
 # no HF cache, no models--org--repo/snapshots/<hash> indirection.
 MODELS_DIR: Path = DATA_DIR / "models"
 
+# Server-side file staging area for the /v1/files API. Clients PUT files
+# here under user-supplied relative paths, then either GET them back or
+# reference them by path in /v1/audio/transcriptions (`file_path` field)
+# instead of re-uploading on every call.
+FILES_DIR: Path = DATA_DIR / "files"
+
 MODEL_IDLE_TIMEOUT_SECONDS: float = _duration_env("TALKIES_MODEL_TTL", 600.0)
 SWEEPER_INTERVAL_SECONDS: float = _duration_env("TALKIES_SWEEPER_INTERVAL", 60.0)
 LOAD_TIMEOUT_SECONDS: float = _duration_env("TALKIES_LOAD_TIMEOUT", 300.0)
 
 MAX_UPLOAD_BYTES: int = _int_env("TALKIES_MAX_UPLOAD_BYTES", 100 * 1024 * 1024)
 
+# URL downloads (when file_path is an http(s) URL). Bigger default than
+# the upload cap — downloads stream to disk, no in-memory buffering.
+MAX_DOWNLOAD_BYTES: int = _int_env("TALKIES_MAX_DOWNLOAD_BYTES", 1024 * 1024 * 1024)
+
+# SSRF guard for URL downloads. Default off (LAN-fetch use cases dominate
+# in self-hosted deployments). Set to true to refuse URLs whose hostname
+# resolves to private / loopback / link-local / multicast / metadata IPs.
+_BLOCK_PRIVATE_RAW: str = os.environ.get(
+    "TALKIES_BLOCK_PRIVATE_DOWNLOADS", "false"
+).strip().lower()
+if _BLOCK_PRIVATE_RAW not in ("", "true", "false", "1", "0", "yes", "no"):
+    raise ValueError(
+        f"TALKIES_BLOCK_PRIVATE_DOWNLOADS={_BLOCK_PRIVATE_RAW!r} must be "
+        "true/false/1/0/yes/no"
+    )
+BLOCK_PRIVATE_DOWNLOADS: bool = _BLOCK_PRIVATE_RAW in ("true", "1", "yes")
+
 PRELOAD: list[str] = _list_env("TALKIES_PRELOAD")
 ENABLED_MODELS: list[str] = _list_env("TALKIES_ENABLED_MODELS")
 
 # VAD chunking — audio longer than this triggers VAD-based segmentation
-# regardless of backend. Backends that don't support timeline assembly
-# (canary SALM) ignore chunks and only see the first VAD region.
+# regardless of backend. SALM uses the same chunker but, because it has
+# no alignment head, concatenates per-chunk text instead of stitching a
+# segments timeline.
 VAD_CHUNK_THRESHOLD_SECONDS: float = _float_env("TALKIES_VAD_CHUNK_THRESHOLD", 30.0)
 VAD_MAX_SPEECH_SECONDS: float = _float_env("TALKIES_VAD_MAX_SPEECH", 28.0)
 VAD_MIN_SILENCE_MS: int = _int_env("TALKIES_VAD_MIN_SILENCE_MS", 500)

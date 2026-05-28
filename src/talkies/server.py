@@ -24,12 +24,17 @@ from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse
+import mimetypes
 
-from . import config
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from . import config, downloads as downloads_mod, files as files_mod
 from .audio import AudioConversionError, NotStereoError, to_wav_16k_mono, to_wav_16k_split_lr
+from .auth import BearerAuthMiddleware
 from .logging import configure as configure_logging
+from .mcp_server import build_mcp_server
 from .models import build_backends
 from .models.base import TranscribeResult
 
@@ -91,13 +96,23 @@ async def _idle_sweeper() -> None:
 _sweeper_task: asyncio.Task[None] | None = None
 
 
+# Forward-declared so _lifespan can drive its session_manager.run() — the
+# actual FastMCP instance is built (and assigned here) further down, after
+# `load_audio_from_path` / `run_transcription_pipeline` exist, since both
+# are injected as callables into the MCP tools.
+MCP_SERVER: Any = None
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    files_mod.ensure_base(config.FILES_DIR)
     log.info(
-        "talkies starting: device=%s models=%s ttl=%.0fs",
+        "talkies starting: device=%s models=%s ttl=%.0fs files_dir=%s auth=%s",
         DEVICE,
         list(BACKENDS.keys()),
         config.MODEL_IDLE_TIMEOUT_SECONDS,
+        config.FILES_DIR,
+        "on" if config.AUTH_TOKEN else "off",
     )
 
     for model_id in config.PRELOAD:
@@ -113,7 +128,10 @@ async def _lifespan(_app: FastAPI):
     global _sweeper_task
     _sweeper_task = asyncio.create_task(_idle_sweeper(), name="talkies-sweeper")
     try:
-        yield
+        # MCP's streamable HTTP transport needs its session manager
+        # running for the lifetime of the app.
+        async with MCP_SERVER.session_manager.run():
+            yield
     finally:
         if _sweeper_task is not None:
             _sweeper_task.cancel()
@@ -132,6 +150,38 @@ app = FastAPI(
     ),
     lifespan=_lifespan,
 )
+
+
+class _MCPSlashRewriteMiddleware:
+    """Rewrite ``/v1/mcp`` to ``/v1/mcp/`` before routing.
+
+    Starlette's ``Mount("/v1/mcp", ...)`` serves requests at ``/v1/mcp/*``
+    but emits a 307 redirect for the bare ``/v1/mcp`` form. Compliant
+    clients re-POST to the new location, but enough MCP clients / curl
+    scripts trip on it that rewriting the path here is cheaper than the
+    docs churn of "remember the trailing slash".
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if scope.get("type") == "http" and scope.get("path") == "/v1/mcp":
+            scope = dict(scope)
+            scope["path"] = "/v1/mcp/"
+            scope["raw_path"] = b"/v1/mcp/"
+        await self.app(scope, receive, send)
+
+
+# Optional bearer auth covers EVERY route — including the mounted MCP
+# sub-app. Pass-through when AUTH_TOKEN is empty (the historical default).
+app.add_middleware(BearerAuthMiddleware, token=config.AUTH_TOKEN)
+# Outermost: normalise `/v1/mcp` -> `/v1/mcp/` so the Mount redirect
+# never fires. Has to wrap the auth middleware so the rewritten path is
+# what auth + routing see.
+app.add_middleware(_MCPSlashRewriteMiddleware)
 
 
 @app.get("/healthz")
@@ -203,9 +253,30 @@ def _parse_diarization(raw: str | None) -> bool:
     return raw.strip().lower() in _DIARIZATION_TRUE
 
 
+async def load_audio_from_path(file_path: str) -> tuple[bytes, str]:
+    """Return ``(raw_bytes, original_name)`` for a URL or staged-file path.
+
+    Raises ``downloads_mod.DownloadError`` / ``files_mod.FilePathError`` for
+    bad input, ``FileNotFoundError`` if a staged path is missing. The
+    ``TALKIES_MAX_UPLOAD_BYTES`` cap intentionally does NOT apply here —
+    the file already lives on disk (or got fetched into the cache under
+    the URL-download cap), and this function just hands the bytes back.
+    """
+    if downloads_mod.is_url(file_path):
+        src_path = await downloads_mod.ensure_downloaded(file_path)
+    else:
+        rel = files_mod.sanitize_path(file_path)
+        src_path = files_mod.resolve_under(config.FILES_DIR, rel)
+        if not src_path.is_file():
+            raise FileNotFoundError(f"file_path not found: {file_path}")
+    raw = await asyncio.to_thread(src_path.read_bytes)
+    return raw, src_path.name
+
+
 @app.post("/v1/audio/transcriptions")
 async def transcribe(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
     model: str = Form(...),
     language: str | None = Form(default=None),
     response_format: str = Form(default="json"),
@@ -218,8 +289,16 @@ async def transcribe(
 ) -> Any:
     del prompt, temperature  # accepted for OpenAI compatibility, not used
 
-    backend = BACKENDS.get(model)
-    if backend is None:
+    has_upload = file is not None and (file.filename or "") != ""
+    has_path = file_path is not None and file_path.strip() != ""
+    if has_upload == has_path:
+        raise HTTPException(
+            status_code=400,
+            detail="must specify exactly one of `file` (multipart upload) "
+                   "or `file_path` (path under /v1/files)",
+        )
+
+    if model not in BACKENDS:
         raise HTTPException(
             status_code=404,
             detail=f"unknown model {model!r}; configured: {list(BACKENDS.keys())}",
@@ -227,9 +306,91 @@ async def transcribe(
 
     do_diarize = _parse_diarization(diarization)
 
+    if has_upload:
+        assert file is not None  # for type checkers; has_upload guarantees this
+        raw = await file.read()
+        if len(raw) > config.MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"upload too large ({len(raw)} bytes > {config.MAX_UPLOAD_BYTES})",
+            )
+        original_name = file.filename or "audio"
+    else:
+        assert file_path is not None
+        try:
+            raw, original_name = await load_audio_from_path(file_path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (downloads_mod.DownloadError, files_mod.FilePathError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        payload = await run_transcription_pipeline(
+            raw=raw,
+            original_name=original_name,
+            model=model,
+            language=language,
+            response_format=response_format,
+            do_diarize=do_diarize,
+            granularities=timestamp_granularities,
+        )
+    except KeyError as exc:
+        # Race: model went away between the 404 check above and the
+        # pipeline's own check (config reload, etc.). Map to 404.
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown model {exc.args[0]!r}",
+        ) from exc
+    except NotStereoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    fmt = (response_format or "json").lower()
+    return _wrap_payload(payload, fmt=fmt)
+
+
+async def run_transcription_pipeline(
+    *,
+    raw: bytes,
+    original_name: str,
+    model: str,
+    language: str | None,
+    response_format: str,
+    do_diarize: bool,
+    granularities: list[str] | None = None,
+) -> str | dict[str, Any]:
+    """Run the post-audio-resolution transcribe flow; return the raw payload.
+
+    Returns:
+      str for fmt in {text/txt/srt/vtt}; dict for fmt in {json/verbose_json}.
+
+    Raises:
+      KeyError                — unknown model slug (caller maps to 404)
+      NotStereoError          — diarization=true on a mono / >2ch input (400)
+      AudioConversionError    — ffmpeg couldn't decode the bytes (400)
+
+    Shared between the HTTP endpoint and the MCP ``transcribe`` tool so
+    both stay in lock-step on eviction, language defaults, and the render.
+    """
+    if model not in BACKENDS:
+        raise KeyError(model)
+    backend = BACKENDS[model]
+    entry = REGISTRY[model]
+    source_lang = language or entry.get("default_source_lang")
+    target_lang = entry.get("default_target_lang", source_lang)
+    task = entry.get("default_task", "asr")
+    fmt = (response_format or "json").lower()
+    # Timestamps are needed for verbose_json (always) and srt/vtt (built from
+    # segments). Cheaper formats (text/json) skip the timestamp pass — except
+    # under diarization, where we use per-segment timestamps to interleave
+    # L/R speakers chronologically. Without timestamps the text/json output
+    # would degenerate to "L: <all L text>\nR: <all R text>" blocks.
+    needs_timestamps = fmt in _VERBOSE_FORMATS or do_diarize
+    grans = list(granularities or [])
+
     # Evict sibling backends — all talkies models compete for the same
     # GPU/RAM, so loading a new one while another is resident risks OOM.
-    # Ollama does this implicitly; we do it explicitly per request.
     siblings = [
         (mid, b) for mid, b in BACKENDS.items() if mid != model and b.loaded()
     ]
@@ -244,43 +405,14 @@ async def transcribe(
             *(b.unload() for _, b in siblings), return_exceptions=True
         )
 
-    raw = await file.read()
-    if len(raw) > config.MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"upload too large ({len(raw)} bytes > {config.MAX_UPLOAD_BYTES})",
-        )
-
-    original_name = file.filename or "audio"
-
-    entry = REGISTRY[model]
-    source_lang = language or entry.get("default_source_lang")
-    target_lang = entry.get("default_target_lang", source_lang)
-    task = entry.get("default_task", "asr")
-
-    fmt = (response_format or "json").lower()
-    # Timestamps are needed for verbose_json (always) and srt/vtt (built from
-    # segments). Cheaper formats (text/json) skip the timestamp pass — except
-    # under diarization, where we use per-segment timestamps to interleave
-    # L/R speakers chronologically. Without timestamps the text/json output
-    # would degenerate to "L: <all L text>\nR: <all R text>" blocks.
-    needs_timestamps = fmt in _VERBOSE_FORMATS or do_diarize
-
     if do_diarize:
-        try:
-            l_path, r_path = await asyncio.to_thread(
-                to_wav_16k_split_lr, raw, original_name
-            )
-        except NotStereoError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except AudioConversionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+        l_path, r_path = await asyncio.to_thread(
+            to_wav_16k_split_lr, raw, original_name
+        )
         try:
             duration = await asyncio.to_thread(_wav_duration_seconds, l_path)
             # Transcribe channels sequentially through the same backend so the
-            # model only sits resident once. (Could parallelise across backend
-            # instances later but right now there's just one.)
+            # model only sits resident once.
             l_res = await backend.transcribe(
                 l_path,
                 source_lang=source_lang,
@@ -307,21 +439,13 @@ async def transcribe(
             result.duration = duration
         if result.language is None:
             result.language = source_lang
-        return _render_response(
-            result,
-            fmt=fmt,
-            task=task,
-            granularities=timestamp_granularities,
-            diarized=True,
+        return _render_payload(
+            result, fmt=fmt, task=task, granularities=grans, diarized=True
         )
 
+    wav_path = await asyncio.to_thread(to_wav_16k_mono, raw, original_name)
     try:
-        wav_path = await asyncio.to_thread(to_wav_16k_mono, raw, original_name)
         duration = await asyncio.to_thread(_wav_duration_seconds, wav_path)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    try:
         result = await backend.transcribe(
             wav_path,
             source_lang=source_lang,
@@ -339,40 +463,99 @@ async def transcribe(
         result.duration = duration
     if result.language is None:
         result.language = source_lang
-
-    return _render_response(
-        result,
-        fmt=fmt,
-        task=task,
-        granularities=timestamp_granularities,
-        diarized=False,
+    return _render_payload(
+        result, fmt=fmt, task=task, granularities=grans, diarized=False
     )
 
 
-def _render_response(
+def _wrap_payload(payload: str | dict[str, Any], *, fmt: str) -> Any:
+    """Translate the pipeline payload into the FastAPI response object."""
+    if fmt in ("text", "txt"):
+        return PlainTextResponse(str(payload))
+    if fmt == "srt":
+        return PlainTextResponse(str(payload), media_type="application/x-subrip")
+    if fmt == "vtt":
+        return PlainTextResponse(str(payload), media_type="text/vtt")
+    return payload
+
+
+def _resolve_files_path(raw: str) -> Any:
+    try:
+        rel = files_mod.sanitize_path(raw)
+        return files_mod.resolve_under(config.FILES_DIR, rel), str(rel)
+    except files_mod.FilePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/files")
+def files_list() -> dict[str, Any]:
+    return {"files": files_mod.list_files(config.FILES_DIR)}
+
+
+@app.put("/v1/files/{path:path}")
+async def files_put(path: str, request: Request) -> JSONResponse:
+    dest, rel_str = _resolve_files_path(path)
+    body = await request.body()
+    if len(body) > config.MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload too large ({len(body)} bytes > {config.MAX_UPLOAD_BYTES})",
+        )
+    await asyncio.to_thread(files_mod.write_atomic, dest, body)
+    return JSONResponse(
+        {"path": rel_str, "size": len(body)},
+        status_code=201,
+    )
+
+
+@app.get("/v1/files/{path:path}")
+def files_get(path: str) -> FileResponse:
+    src, rel_str = _resolve_files_path(path)
+    if src.is_symlink() or not src.is_file():
+        raise HTTPException(status_code=404, detail=f"file not found: {rel_str}")
+    mime, _ = mimetypes.guess_type(src.name)
+    return FileResponse(
+        path=str(src),
+        media_type=mime or "application/octet-stream",
+        filename=src.name,
+    )
+
+
+@app.delete("/v1/files/{path:path}")
+def files_delete(path: str) -> JSONResponse:
+    target, rel_str = _resolve_files_path(path)
+    if target.is_symlink() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"file not found: {rel_str}")
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"unlink failed: {exc}") from exc
+    files_mod.prune_empty_parents(target, config.FILES_DIR)
+    return JSONResponse({"deleted": rel_str}, status_code=200)
+
+
+def _render_payload(
     result: TranscribeResult,
     *,
     fmt: str,
     task: str,
     granularities: list[str],
     diarized: bool,
-) -> Any:
+) -> str | dict[str, Any]:
+    """Convert a TranscribeResult into the raw payload for the response.
+
+    Returns a string for plain-text formats (text/txt/srt/vtt) and a dict
+    for JSON formats (json/verbose_json). The HTTP wrapper / MCP tool then
+    decides how to serialise + transport it.
+    """
     if fmt in ("text", "txt"):
-        if diarized:
-            return PlainTextResponse(_diarized_text(result))
-        return PlainTextResponse(result.text)
+        return _diarized_text(result) if diarized else result.text
     if fmt == "verbose_json":
         return _verbose_json_response(result, task=task, granularities=granularities)
     if fmt == "srt":
-        return PlainTextResponse(
-            _segments_to_srt(_segments_for_subtitles(result), diarized=diarized),
-            media_type="application/x-subrip",
-        )
+        return _segments_to_srt(_segments_for_subtitles(result), diarized=diarized)
     if fmt == "vtt":
-        return PlainTextResponse(
-            _segments_to_vtt(_segments_for_subtitles(result), diarized=diarized),
-            media_type="text/vtt",
-        )
+        return _segments_to_vtt(_segments_for_subtitles(result), diarized=diarized)
     if diarized:
         return {"text": _diarized_text(result)}
     return {"text": result.text}
@@ -581,12 +764,23 @@ def _segments_to_vtt(segments: list[dict], *, diarized: bool = False) -> str:
     return "\n".join(lines)
 
 
+# MCP server wiring. Built once at import time so the lifespan can drive
+# its session manager and FastAPI routes know about the mount.
+MCP_SERVER = build_mcp_server(
+    backends=BACKENDS,
+    registry=REGISTRY,
+    transcribe_runner=run_transcription_pipeline,
+    audio_loader=load_audio_from_path,
+)
+app.mount("/v1/mcp", MCP_SERVER.streamable_http_app())
+
+
 def main() -> int:
     configure_logging()
     import uvicorn
 
-    log.info("talkies: starting on %s:%d", config.HOST, config.PORT)
-    uvicorn.run(app, host=config.HOST, port=config.PORT, log_config=None)
+    log.info("talkies: starting on 0.0.0.0:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
     return 0
 
 
