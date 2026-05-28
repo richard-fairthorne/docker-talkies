@@ -5,24 +5,88 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-> Self-hosted OpenAI-compatible speech service. `POST /v1/audio/transcriptions` against seven open ASR models, `POST /v1/audio/speech` against Kokoro TTS (fast, multilingual) and Qwen3-TTS (CUDA-only voice cloning) — one container, one wire format. Point your existing OpenAI client at it, change the model slug, and you're done.
+> **Self-hosted, OpenAI-compatible speech server.** 7 ASR backends, 2 TTS engines, voice cloning, MCP — one Docker container, one wire format.
 
-`POST /v1/audio/transcriptions` with a multipart `file` + a `model` slug → text back. `POST /v1/audio/speech` with a JSON body (`model` + `input` + `voice`) → audio bytes back. Same wire shape as OpenAI for both. The same client you point at `api.openai.com/v1/audio/{transcriptions,speech}` works here, you just change the base URL and the slug. That's the entire story.
+```python
+# Drop-in: point your existing OpenAI client at it, change the slug.
+from openai import OpenAI
+c = OpenAI(base_url="http://localhost:8000/v1", api_key="x")
 
-Swap the ASR slug — `whisper-large-v3`, `whisper-large-v3-turbo`, `distil-whisper-large-v3`, `parakeet-tdt-0.6b-v3`, `canary-180m-flash`, `canary-1b-flash`, `canary-qwen-2.5b` — and the transcription contract stays identical. Behind the scenes the request is dispatched to the right backend (faster-whisper for the whisper family, NeMo for everything else), the audio is normalized to 16 kHz mono WAV, long files are sliced via Silero VAD into ≤28-second speech regions, results are stitched back into one Whisper-shape timeline. None of that leaks into the wire shape. You just get text.
+c.audio.transcriptions.create(model="whisper-large-v3-turbo", file=open("a.mp3", "rb"))
+c.audio.speech.create(model="qwen3-tts-0.6b", voice="alloy", input="hello").stream_to_file("out.mp3")
+```
 
-For TTS there are two slugs:
+The same client you use against `api.openai.com` works here — only the base URL and the slug change. That's the entire story.
 
-- `kokoro-82m` (Kokoro-82M, Apache 2.0, ~41 voices across en/es/fr/hi/it/pt) — the fast in-process pipeline. Sub-second synthesis on CPU and trivial on GPU.
-- `qwen3-tts-0.6b` (Qwen3-TTS-12Hz-0.6B-Base, Apache 2.0, CUDA only) — voice cloning. Bring your own reference `.wav` (10-30s of clean speech is plenty), drop it into `/data/custom-voices/<your-name>.wav`, and synthesize in that speaker's voice via `voice=<your-name>`. Supports nested paths (`/data/custom-voices/clients/acme/jane.wav` → `voice=clients/acme/jane`). Three sample voices (`alloy`, `echo`, `fable`) ship baked into the image.
+- **7 ASR backends** — Whisper (v3 / turbo / distil), Parakeet-TDT, Canary-180M-Flash / 1B-Flash / Canary-Qwen-2.5B. Whisper-shape response across all of them; long files get sliced via Silero VAD and stitched back.
+- **2 TTS engines** — Kokoro-82M (~41 voices across en/es/fr/hi/it/pt, sub-second on CPU) and Qwen3-TTS-0.6B (CUDA-only voice cloning).
+- **Voice cloning** — drop a 10-30 s reference `.wav` into `/data/custom-voices/<name>.wav`, synth as `voice=<name>`. Nested paths preserved (`clients/acme/jane.wav` → `voice=clients/acme/jane`). Live re-scan, no restart.
+- **Hot model swap + idle eviction** — one GPU pool serves both modalities, Ollama-style `/api/ps` for introspection, `DELETE /api/ps/<slug>` to evict.
+- **MCP server built in** at `/v1/mcp` — Claude / Cursor / IDE-side LLMs can call transcribe + speak as tools.
+- **Stereo diarization** without bolting on a separate model — left channel = speaker L, right = speaker R, chronological `L:` / `R:` turn lines.
+- **CPU + CUDA images** — `psyb0t/talkies:latest` (CPU + Kokoro + 4 ASR models) and `:latest-cuda` (everything, ~11 GB VRAM at full load).
 
-Pass `model=<slug>`, an `input` string, and a `voice` from `GET /v1/audio/voices` — the server runs the matching backend's pipeline, encodes the raw PCM into your requested `response_format` (`mp3`/`opus`/`aac`/`flac`/`wav`/`pcm`) via ffmpeg, and streams the bytes back with the matching `Content-Type`.
+## Quick start
 
-Need stereo speaker diarization on transcription? Pass `diarization=true` and upload a stereo file — left channel = speaker L, right channel = speaker R, output gets per-segment `channel` tags and the text is split into chronological `L:` / `R:` turn lines. Two-mic setups (interview rigs, podcast splits, dual-track ham recordings) end up with a clean transcript without you having to bolt a separate diarization model onto your stack.
+```bash
+docker run -d --name talkies \
+  -v $HOME/talkies-data:/data \
+  -p 8000:8000 \
+  psyb0t/talkies:latest
 
-## Table of contents
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@samples/hello.wav" \
+  -F "model=whisper-large-v3-turbo" | jq
+```
+
+First boot downloads every model in `models.json` into `/data/models/<slug>/` (75 MB-3 GB each — bind-mount `/data` so they survive restarts). Restrict the set with `-e TALKIES_ENABLED_MODELS=whisper-large-v3-turbo,canary-180m-flash`. GPU: pull `psyb0t/talkies:latest-cuda` and add `--gpus all`.
+
+<details>
+<summary><b>More <code>curl</code> examples</b> — verbose JSON, SRT, stereo diarization, TTS, model management</summary>
+
+```bash
+# Verbose JSON — full Whisper shape with per-segment + per-word timestamps.
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@samples/hello.wav" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "response_format=verbose_json" \
+  -F "timestamp_granularities[]=word" \
+  -F "timestamp_granularities[]=segment" | jq
+
+# SRT subtitle output (drop straight into a video player).
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@samples/lecture.mp3" \
+  -F "model=whisper-large-v3" \
+  -F "response_format=srt" > lecture.srt
+
+# Stereo diarization — left/right channels become speakers L/R.
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@samples/interview-stereo.wav" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "diarization=true" \
+  -F "response_format=verbose_json" | jq
+
+# Kokoro TTS — list the shipped voices, then synthesize an MP3.
+curl -s http://localhost:8000/v1/audio/voices | jq
+curl -s http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"kokoro-82m","input":"Hello from talkies.","voice":"af_heart","response_format":"mp3"}' \
+  --output hello.mp3
+
+# Which models are configured, which are loaded, evict one if you want.
+curl -s http://localhost:8000/v1/models | jq
+curl -s http://localhost:8000/api/ps | jq
+curl -s -X DELETE "http://localhost:8000/api/ps/whisper-large-v3-turbo"
+curl -s -X POST  http://localhost:8000/unload | jq    # evict everything
+```
+
+</details>
+
+<details>
+<summary><b>Table of contents</b></summary>
 
 - [Quick start](#quick-start)
+- [How it works](#how-it-works)
 - [Supported models](#supported-models)
 - [What's NOT supported](#whats-not-supported)
 - [API — `POST /v1/audio/transcriptions`](#api--post-v1audiotranscriptions)
@@ -55,68 +119,24 @@ Need stereo speaker diarization on transcription? Pass `diarization=true` and up
 - [Credits](#credits)
 - [License](#license)
 
-## Quick start
+</details>
 
-```bash
-docker run -d --name talkies \
-  -v $HOME/talkies-data:/data \
-  -p 8000:8000 \
-  psyb0t/talkies:latest
+## How it works
 
-# On boot the entrypoint downloads every model in models.json into
-# /data/models/<slug>/ as flat directories — no HF cache, no
-# `models--org--repo/snapshots/<hash>` indirection. Each snapshot is
-# ~75MB-3GB. /data also holds /data/files/ (staging area for the
-# /v1/files API) and /data/custom-voices/ (user-supplied voice clones
-# for Qwen3-TTS). Bind-mount /data so all three survive restarts.
-# To restrict the download set
-# `-e TALKIES_ENABLED_MODELS=whisper-large-v3-turbo,canary-180m-flash`
-# — only those slugs are pulled, and only those are queryable.
-curl -s http://localhost:8000/v1/audio/transcriptions \
-  -F "file=@samples/hello.wav" \
-  -F "model=whisper-large-v3-turbo" | jq
+`POST /v1/audio/transcriptions` with a multipart `file` + a `model` slug → text back. `POST /v1/audio/speech` with a JSON body (`model` + `input` + `voice`) → audio bytes back. Same wire shape as OpenAI for both.
 
-# Verbose JSON — full Whisper shape with per-segment + per-word timestamps.
-curl -s http://localhost:8000/v1/audio/transcriptions \
-  -F "file=@samples/hello.wav" \
-  -F "model=whisper-large-v3-turbo" \
-  -F "response_format=verbose_json" \
-  -F "timestamp_granularities[]=word" \
-  -F "timestamp_granularities[]=segment" | jq
+Swap the ASR slug — `whisper-large-v3`, `whisper-large-v3-turbo`, `distil-whisper-large-v3`, `parakeet-tdt-0.6b-v3`, `canary-180m-flash`, `canary-1b-flash`, `canary-qwen-2.5b` — and the transcription contract stays identical. Behind the scenes the request is dispatched to the right backend (faster-whisper for the whisper family, NeMo for everything else), audio is normalized to 16 kHz mono WAV, long files are sliced via Silero VAD into ≤28-second speech regions, results are stitched back into one Whisper-shape timeline. None of that leaks into the wire shape. You just get text.
 
-# SRT subtitle output (drop straight into a video player).
-curl -s http://localhost:8000/v1/audio/transcriptions \
-  -F "file=@samples/lecture.mp3" \
-  -F "model=whisper-large-v3" \
-  -F "response_format=srt" > lecture.srt
+For TTS there are two slugs:
 
-# Stereo diarization — left/right channels become speakers L/R.
-curl -s http://localhost:8000/v1/audio/transcriptions \
-  -F "file=@samples/interview-stereo.wav" \
-  -F "model=whisper-large-v3-turbo" \
-  -F "diarization=true" \
-  -F "response_format=verbose_json" | jq
+- `kokoro-82m` (Kokoro-82M, Apache 2.0, ~41 voices across en/es/fr/hi/it/pt) — the fast in-process pipeline. Sub-second synthesis on CPU and trivial on GPU.
+- `qwen3-tts-0.6b` (Qwen3-TTS-12Hz-0.6B-Base, Apache 2.0, CUDA only) — voice cloning. Bring your own reference `.wav` (10-30 s of clean speech is plenty), drop it into `/data/custom-voices/<your-name>.wav`, and synthesize in that speaker's voice via `voice=<your-name>`. Supports nested paths (`/data/custom-voices/clients/acme/jane.wav` → `voice=clients/acme/jane`). Three sample voices (`alloy`, `echo`, `fable`) ship baked into the image.
 
-# Kokoro TTS — list the shipped voices, then synthesize an MP3.
-curl -s http://localhost:8000/v1/audio/voices | jq
-curl -s http://localhost:8000/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{
-        "model": "kokoro-82m",
-        "input": "Hello from talkies.",
-        "voice": "af_heart",
-        "response_format": "mp3"
-      }' \
-  --output hello.mp3
+Pass `model=<slug>`, an `input` string, and a `voice` from `GET /v1/audio/voices` — the server runs the matching backend's pipeline, encodes the raw PCM into your requested `response_format` (`mp3` / `opus` / `aac` / `flac` / `wav` / `pcm`) via ffmpeg, and streams the bytes back with the matching `Content-Type`.
 
-# Which models are configured, which are loaded, evict one if you want.
-curl -s http://localhost:8000/v1/models | jq
-curl -s http://localhost:8000/api/ps | jq
-curl -s -X DELETE "http://localhost:8000/api/ps/whisper-large-v3-turbo"
-curl -s -X POST  http://localhost:8000/unload | jq    # evict everything
-```
+Need stereo speaker diarization on transcription? Pass `diarization=true` and upload a stereo file — left channel = speaker L, right channel = speaker R, output gets per-segment `channel` tags and the text is split into chronological `L:` / `R:` turn lines. Two-mic setups (interview rigs, podcast splits, dual-track ham recordings) end up with a clean transcript without you having to bolt a separate diarization model onto your stack.
 
-GPU variant: pull `psyb0t/talkies:latest-cuda` and add `--gpus all` to `docker run`. The CPU image ships the four ASR models that actually run reasonably without a GPU (the three Whisper variants + `canary-180m-flash`) plus Kokoro TTS. The CUDA image adds Parakeet-TDT, Canary-1B-Flash, and Canary-Qwen-2.5B on top — they need VRAM to be anything other than a space heater. Kokoro is fast enough on CPU that it ships in both images.
+GPU variant (`psyb0t/talkies:latest-cuda` + `--gpus all`) ships everything; the CPU image (`psyb0t/talkies:latest`) ships the four ASR models that actually run reasonably without a GPU (the three Whisper variants + `canary-180m-flash`) plus Kokoro TTS. Parakeet-TDT, Canary-1B-Flash, Canary-Qwen-2.5B, and Qwen3-TTS need VRAM to be anything other than a space heater, so they're CUDA-only. Kokoro is fast enough on CPU that it ships in both images.
 
 ## Supported models
 
