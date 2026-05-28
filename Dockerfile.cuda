@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 #
-# CUDA image — NVIDIA CUDA 12.6 base + PyTorch CUDA + nemo_toolkit[asr] + faster-whisper.
-# Serves whisper variants, parakeet-tdt, and all three canary models
-# (180m-flash, 1b-flash, canary-qwen-2.5b).
+# CUDA image — NVIDIA CUDA 12.6 base + PyTorch CUDA + nemo_toolkit[asr] +
+# faster-whisper + kokoro (TTS). Serves whisper variants, parakeet-tdt, all
+# three canary models (180m-flash, 1b-flash, canary-qwen-2.5b) for ASR, plus
+# kokoro-82m TTS via /v1/audio/speech.
 #
 # We use the CUDA runtime base (not cudnn-devel) and let pytorch's bundled
 # CUDA libs handle the rest. nemo_toolkit[asr] pulls flash-attn etc. on
@@ -65,7 +66,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "nvidia-cublas-cu12==12.6.4.1" \
         "silero-vad==6.0.0" \
         "onnxruntime==1.20.1" \
-        "numpy==1.26.4"
+        "numpy==1.26.4" \
+        "kokoro==0.9.4" \
+    && uv pip install --python /opt/venv/bin/python --no-config \
+        "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 
 # -----------------------------------------------------------------------------
 # Runtime — uses CUDA 12.6 runtime on ubuntu24.04 (python3.12 in base repos).
@@ -92,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
         libgomp1 \
         ca-certificates \
+        espeak-ng \
     && rm -rf /var/lib/apt/lists/* \
     && (userdel -r ubuntu 2>/dev/null || true) \
     && useradd -u 1000 --create-home --shell /bin/bash talkies \

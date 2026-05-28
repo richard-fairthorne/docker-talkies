@@ -1,14 +1,16 @@
-"""FastAPI app — OpenAI-compatible /v1/audio/transcriptions + resource-mgmt API.
+"""FastAPI app — OpenAI-compatible speech endpoints + resource-mgmt API.
 
 Endpoints (mirror the speaches surface where possible so the LiteLLM resource
 manager can drive both with the same client code):
 
   GET    /healthz                          unauthenticated liveness
-  GET    /v1/models                        list configured model_ids
+  GET    /v1/models                        list configured model_ids (with modality)
+  GET    /v1/audio/voices                  list TTS voices by model
   GET    /api/ps                           list currently loaded model_ids
   DELETE /api/ps/{model_id}                evict one model from VRAM/RAM
   POST   /unload                           evict all loaded models
-  POST   /v1/audio/transcriptions          OpenAI-compatible transcription
+  POST   /v1/audio/transcriptions          OpenAI-compatible ASR
+  POST   /v1/audio/speech                  OpenAI-compatible TTS
 
 The DELETE /api/ps/{model_id} path accepts URL-encoded model_ids so the LiteLLM
 resource manager's existing `model_id.replace("/", "%2F")` call works against
@@ -27,15 +29,16 @@ from urllib.parse import unquote
 import mimetypes
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import config, downloads as downloads_mod, files as files_mod
+from . import config, downloads as downloads_mod, files as files_mod, tts as tts_mod
 from .audio import AudioConversionError, NotStereoError, to_wav_16k_mono, to_wav_16k_split_lr
 from .auth import BearerAuthMiddleware
 from .logging import configure as configure_logging
 from .mcp_server import build_mcp_server
-from .models import build_backends
+from .models import build_backends, is_asr_backend, is_tts_backend
 from .models.base import TranscribeResult
 
 
@@ -144,8 +147,8 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(
     title="talkies",
     description=(
-        "NeMo Canary ASR wrapper — OpenAI-compatible /v1/audio/transcriptions "
-        "over canary-180m-flash, canary-1b-flash, canary-qwen-2.5b. "
+        "OpenAI-compatible speech wrapper — /v1/audio/transcriptions over "
+        "Whisper / Parakeet / Canary ASR + /v1/audio/speech over Kokoro TTS. "
         "Lazy-loads models on first request, idle-unloads after TALKIES_MODEL_TTL."
     ),
     lifespan=_lifespan,
@@ -189,15 +192,53 @@ def healthz() -> dict[str, Any]:
     return {"ok": True, "device": DEVICE, "models": list(BACKENDS.keys())}
 
 
+def _modality_of(model_id: str) -> str:
+    backend = BACKENDS[model_id]
+    if is_tts_backend(backend):
+        return "tts"
+    return "asr"
+
+
 @app.get("/v1/models")
 def list_models() -> dict[str, Any]:
     return {
         "object": "list",
         "data": [
-            {"id": mid, "object": "model", "owned_by": "talkies"}
+            {
+                "id": mid,
+                "object": "model",
+                "owned_by": "talkies",
+                "modality": _modality_of(mid),
+            }
             for mid in BACKENDS.keys()
         ],
     }
+
+
+@app.get("/v1/audio/voices")
+def list_voices() -> dict[str, Any]:
+    """List available TTS voices across all loaded TTS models.
+
+    Returned shape: ``{"voices": [{"voice": str, "model": str,
+    "default": bool}]}``. Pass any ``voice`` value to ``POST
+    /v1/audio/speech`` together with its ``model`` slug — voices are not
+    interchangeable across models (each TTS engine owns its own catalog).
+    """
+    out: list[dict[str, Any]] = []
+    for mid, backend in BACKENDS.items():
+        if not is_tts_backend(backend):
+            continue
+        try:
+            default = backend.default_voice()
+            catalog = backend.voices()
+        except RuntimeError as exc:
+            log.warning("voice listing failed for %s: %s", mid, exc)
+            continue
+        for v in catalog:
+            out.append(
+                {"voice": v, "model": mid, "default": v == default}
+            )
+    return {"voices": out}
 
 
 @app.get("/api/ps")
@@ -273,6 +314,104 @@ async def load_audio_from_path(file_path: str) -> tuple[bytes, str]:
     return raw, src_path.name
 
 
+class SpeechRequest(BaseModel):
+    """OpenAI-compatible POST body for ``/v1/audio/speech``.
+
+    ``instructions`` is accepted for wire compatibility but currently
+    ignored — Kokoro doesn't take instruction prompts. ``speed`` clamped
+    to 0.25-4.0 (matches OpenAI's documented range).
+    """
+
+    model: str
+    input: str
+    voice: str | None = None
+    response_format: str | None = None
+    speed: float | None = Field(default=None, ge=0.25, le=4.0)
+    instructions: str | None = None
+
+
+@app.post("/v1/audio/speech")
+async def speech(body: SpeechRequest) -> Response:
+    # body.instructions is accepted for OpenAI parity but currently ignored —
+    # Kokoro has no instruction-prompt input.
+
+    model = body.model
+    if model not in BACKENDS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown model {model!r}; configured: {list(BACKENDS.keys())}",
+        )
+    backend = BACKENDS[model]
+    if not is_tts_backend(backend):
+        raise HTTPException(
+            status_code=400,
+            detail=f"model {model!r} is not a TTS model — try /v1/audio/transcriptions",
+        )
+
+    try:
+        default_voice = backend.default_voice()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    voice = body.voice or default_voice
+    catalog = backend.voices()
+    if voice not in catalog:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown voice {voice!r} for model {model!r}; "
+                f"{len(catalog)} voice(s) available — call GET /v1/audio/voices "
+                "to list them"
+            ),
+        )
+
+    fmt = (body.response_format or "mp3").lower()
+    if fmt not in tts_mod.SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unsupported response_format {fmt!r}; supported: "
+                f"{list(tts_mod.SUPPORTED_FORMATS)}"
+            ),
+        )
+
+    speed = body.speed if body.speed is not None else 1.0
+
+    if not body.input.strip():
+        raise HTTPException(status_code=400, detail="input text is empty")
+
+    # Sibling eviction — TTS competes with ASR for the same VRAM/RAM pool.
+    siblings = [
+        (mid, b) for mid, b in BACKENDS.items() if mid != model and b.loaded()
+    ]
+    if siblings:
+        log.info(
+            "evicting %d sibling backend(s) before loading %s (tts): %s",
+            len(siblings),
+            model,
+            [mid for mid, _ in siblings],
+        )
+        await asyncio.gather(
+            *(b.unload() for _, b in siblings), return_exceptions=True
+        )
+
+    try:
+        synth = await backend.synthesize(body.input, voice=voice, speed=speed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    try:
+        audio_bytes, content_type = await tts_mod.encode_audio(
+            synth.pcm_int16, synth.sample_rate, fmt
+        )
+    except tts_mod.TTSEncodingError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return Response(content=audio_bytes, media_type=content_type)
+
+
 @app.post("/v1/audio/transcriptions")
 async def transcribe(
     file: UploadFile | None = File(default=None),
@@ -302,6 +441,11 @@ async def transcribe(
         raise HTTPException(
             status_code=404,
             detail=f"unknown model {model!r}; configured: {list(BACKENDS.keys())}",
+        )
+    if not is_asr_backend(BACKENDS[model]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"model {model!r} is not an ASR model — try /v1/audio/speech",
         )
 
     do_diarize = _parse_diarization(diarization)

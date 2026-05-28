@@ -16,6 +16,12 @@
 #   TALKIES_TEST_KEEP=1     don't `docker rm` the container at exit (debug)
 #   TALKIES_SKIP_BUILD=1    skip `make build-cuda` — use whatever's tagged
 #   TALKIES_ENABLED_MODELS  comma slugs to download; empty = all 7 (default)
+#   TALKIES_TEST_CPU_PCT    cap container CPU at this % of host cores (default 70).
+#                           Stops the test from wedging the host under build / heavy
+#                           inference. Set to 0/empty to disable the cap.
+#   TALKIES_TEST_MEM        memory cap passed to `docker run --memory` (default 32g).
+#                           Combined with --memory-swap=$mem the kernel can't dump
+#                           process pages into host swap when buffer cache gets fat.
 
 set -eo pipefail
 
@@ -69,8 +75,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Compute CPU cap. Default 70% of host cores — leaves headroom so the desktop
+# stays responsive while the container is grinding through whisper/parakeet
+# inference and Kokoro synth. Anything < 1 falls back to "no cap".
+TALKIES_TEST_CPU_PCT="${TALKIES_TEST_CPU_PCT:-70}"
+HOST_CPUS=$(nproc)
+CPU_LIMIT_ARGS=()
+if [ "${TALKIES_TEST_CPU_PCT:-0}" -gt 0 ] 2>/dev/null; then
+    # bc keeps fractional precision (e.g. 16 * 70 / 100 = 11.2)
+    CPU_CAP=$(awk -v c="$HOST_CPUS" -v p="$TALKIES_TEST_CPU_PCT" 'BEGIN{printf "%.2f", c*p/100}')
+    CPU_LIMIT_ARGS=(--cpus "$CPU_CAP")
+    echo "[run] cpu cap: ${TALKIES_TEST_CPU_PCT}% of ${HOST_CPUS} cores → --cpus $CPU_CAP"
+fi
+
+# Memory cap. --memory + --memory-swap=$mem disables in-container swap, which
+# stops the kernel from spilling test container pages into the host's swap file
+# — that's what was eating the desktop's responsiveness.
+TALKIES_TEST_MEM="${TALKIES_TEST_MEM:-32g}"
+MEM_LIMIT_ARGS=()
+if [ -n "$TALKIES_TEST_MEM" ]; then
+    MEM_LIMIT_ARGS=(--memory "$TALKIES_TEST_MEM" --memory-swap "$TALKIES_TEST_MEM")
+    echo "[run] mem cap: --memory $TALKIES_TEST_MEM (swap disabled in container)"
+fi
+
 echo "[run] launching $CONTAINER_NAME (port=$TALKIES_TEST_PORT cache=$TALKIES_TEST_CACHE)"
 docker run -d --rm --gpus all \
+    "${CPU_LIMIT_ARGS[@]}" \
+    "${MEM_LIMIT_ARGS[@]}" \
     --name "$CONTAINER_NAME" \
     -v "$TALKIES_TEST_CACHE:/data" \
     -e TALKIES_DEVICE=cuda \

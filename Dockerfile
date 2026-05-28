@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 #
-# CPU image — Ubuntu 22.04 + CPU PyTorch + nemo_toolkit[asr] + faster-whisper.
-# Serves whisper variants + canary-180m-flash on CPU. Parakeet/1b-flash/qwen-2.5b
-# need GPU and live in Dockerfile.cuda.
+# CPU image — Ubuntu 22.04 + CPU PyTorch + nemo_toolkit[asr] + faster-whisper +
+# kokoro (TTS). Serves whisper variants + canary-180m-flash on CPU for ASR
+# (parakeet/1b-flash/qwen-2.5b need GPU and live in Dockerfile.cuda), plus
+# kokoro-82m TTS via /v1/audio/speech.
 #
 # Heavy ML deps (torch CPU + nemo_toolkit) installed in the runtime stage
 # from explicit pins. Hash-locking is a follow-up; for now we rely on
@@ -55,7 +56,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "ctranslate2==4.6.0" \
         "silero-vad==6.0.0" \
         "onnxruntime==1.20.1" \
-        "numpy==1.26.4"
+        "numpy==1.26.4" \
+        "kokoro==0.9.4" \
+    && uv pip install --python /opt/venv/bin/python --no-config \
+        "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS runtime
@@ -74,6 +78,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libsndfile1 \
         libgomp1 \
+        espeak-ng \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -u 1000 --create-home --shell /bin/bash talkies \
     && mkdir -p /data \

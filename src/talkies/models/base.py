@@ -1,4 +1,14 @@
-"""Backend protocol — uniform load/transcribe/unload surface per executor type."""
+"""Backend protocols — uniform lifecycle for ASR and TTS executors.
+
+All backends share lazy load + idle-unload semantics (``loaded`` /
+``unload`` / ``get_model`` / ``last_used_secs_ago``) so the idle sweeper
+and sibling-eviction logic in ``server.py`` work uniformly across
+modalities — one model resident at a time across the shared VRAM/RAM
+pool.
+
+ASR backends add ``transcribe()``; TTS backends add ``synthesize()`` +
+voice introspection.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +18,7 @@ from typing import Protocol
 
 @dataclass
 class TranscribeResult:
-    """Backend output. `segments` / `words` populated only when the backend
+    """ASR backend output. `segments` / `words` populated only when the backend
     supports timestamps and the caller requested them.
 
     Segments / words follow the OpenAI verbose_json shape:
@@ -28,18 +38,40 @@ class TranscribeResult:
     supports_timestamps: bool = False
 
 
-class Backend(Protocol):
-    """Per-model handle.
+@dataclass
+class SynthesisResult:
+    """TTS backend output — raw mono int16 PCM at ``sample_rate`` Hz.
 
-    Backends are instantiated lazily on first request — `get_model()` populates
-    the underlying NeMo object; later calls return the cached instance until
-    `unload()` is called (manually or by the idle sweeper).
+    The router (``tts.encode_audio``) converts these bytes into the
+    requested ``response_format`` (mp3/opus/aac/flac/wav/pcm).
+    """
+
+    pcm_int16: bytes
+    sample_rate: int
+
+
+class BackendBase(Protocol):
+    """Lifecycle surface shared by all backends.
+
+    Backends are instantiated lazily on first request — ``get_model()`` populates
+    the underlying model; later calls return the cached instance until
+    ``unload()`` is called (manually or by the idle sweeper).
     """
 
     model_id: str
     repo: str
 
     async def get_model(self) -> object: ...
+
+    async def unload(self) -> None: ...
+
+    def loaded(self) -> bool: ...
+
+    def last_used_secs_ago(self) -> float | None: ...
+
+
+class ASRBackend(BackendBase, Protocol):
+    """Per-ASR-model handle."""
 
     async def transcribe(
         self,
@@ -51,8 +83,27 @@ class Backend(Protocol):
         with_timestamps: bool = False,
     ) -> TranscribeResult: ...
 
-    async def unload(self) -> None: ...
 
-    def loaded(self) -> bool: ...
+class TTSBackend(BackendBase, Protocol):
+    """Per-TTS-model handle.
 
-    def last_used_secs_ago(self) -> float | None: ...
+    Each TTS backend declares its own voice catalog — the route validates
+    the caller-supplied ``voice`` against ``voices()`` for the requested
+    model. No cross-model voice aliasing.
+    """
+
+    def voices(self) -> list[str]: ...
+
+    def default_voice(self) -> str: ...
+
+    async def synthesize(
+        self,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+    ) -> SynthesisResult: ...
+
+
+Backend = ASRBackend
+"""Backwards-compatibility alias — older code imported ``Backend`` for ASR."""

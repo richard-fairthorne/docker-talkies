@@ -55,15 +55,19 @@ test_talkies_delete_unknown_returns_404() {
     echo "OK: talkies_delete_unknown_returns_404"
 }
 
-# ── /v1/audio/transcriptions without a file → 422 (FastAPI multipart) ────────
+# ── /v1/audio/transcriptions without file or file_path → 400 ────────────────
+# Both `file` and `file_path` are optional at the schema level (so either form
+# of input is accepted); the handler then requires exactly one to be set and
+# raises 400 if neither is supplied. Not a 422 — that would imply the schema
+# itself was invalid, which it isn't.
 
-test_talkies_transcribe_missing_file_returns_422() {
+test_talkies_transcribe_missing_file_returns_400() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST -F "model=whisper-large-v3-turbo" \
         "${TALKIES_BASE_URL}/v1/audio/transcriptions")
-    assert_eq "$code" "422" "missing file → 422" || return 1
-    echo "OK: talkies_transcribe_missing_file_returns_422"
+    assert_eq "$code" "400" "missing file → 400" || return 1
+    echo "OK: talkies_transcribe_missing_file_returns_400"
 }
 
 # ── /v1/audio/transcriptions with unknown model → 404 ────────────────────────
@@ -90,6 +94,6 @@ ALL_TESTS+=(
     test_talkies_api_ps
     test_talkies_unload_all
     test_talkies_delete_unknown_returns_404
-    test_talkies_transcribe_missing_file_returns_422
+    test_talkies_transcribe_missing_file_returns_400
     test_talkies_transcribe_unknown_model_returns_404
 )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .. import config
+from .kokoro import KokoroBackend
 from .multitask import MultitaskBackend
 from .parakeet import ParakeetBackend
 from .salm import SalmBackend
@@ -41,6 +42,14 @@ def build_backends(registry: dict[str, dict], device: str) -> dict[str, Any]:
                 device=device,
             )
             continue
+        if executor == "kokoro":
+            out[model_id] = KokoroBackend(
+                model_id=model_id,
+                repo=repo,
+                model_path=model_path,
+                device=device,
+            )
+            continue
         out[model_id] = MultitaskBackend(
             model_id=model_id,
             repo=repo,
@@ -48,3 +57,14 @@ def build_backends(registry: dict[str, dict], device: str) -> dict[str, Any]:
             device=device,
         )
     return out
+
+
+def is_tts_backend(backend: Any) -> bool:
+    """Backends are duck-typed on the route layer — TTS backends have
+    ``synthesize`` and ``voices``, ASR backends have ``transcribe``.
+    """
+    return hasattr(backend, "synthesize") and hasattr(backend, "voices")
+
+
+def is_asr_backend(backend: Any) -> bool:
+    return hasattr(backend, "transcribe")

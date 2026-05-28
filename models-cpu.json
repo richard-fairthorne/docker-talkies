@@ -19,6 +19,13 @@
       "default_target_lang": "en",
       "default_task": "asr",
       "languages": ["en"]
+    },
+    "kokoro-82m": {
+      "repo": "hexgrad/Kokoro-82M",
+      "executor": "kokoro",
+      "modality": "tts",
+      "default_voice": "af_heart",
+      "languages": ["en", "es", "fr", "hi", "it", "pt"]
     }
   }
 }

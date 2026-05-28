@@ -76,10 +76,14 @@ def build_mcp_server(
 
         Returns a list of ``{slug, executor, default_source_lang,
         default_target_lang, default_task, loaded}`` entries. Pick one and
-        pass its ``slug`` to ``transcribe`` as ``model``.
+        pass its ``slug`` to ``transcribe`` as ``model``. TTS-only models
+        (e.g. ``kokoro-82m``) are filtered out — call them over the HTTP
+        ``/v1/audio/speech`` endpoint instead.
         """
         out: list[dict[str, Any]] = []
-        for slug in backends:
+        for slug, backend in backends.items():
+            if not hasattr(backend, "transcribe"):
+                continue
             entry = registry.get(slug, {})
             out.append(
                 {
@@ -88,7 +92,7 @@ def build_mcp_server(
                     "default_source_lang": entry.get("default_source_lang"),
                     "default_target_lang": entry.get("default_target_lang"),
                     "default_task": entry.get("default_task", "asr"),
-                    "loaded": backends[slug].loaded(),
+                    "loaded": backend.loaded(),
                 }
             )
         return {"models": out}

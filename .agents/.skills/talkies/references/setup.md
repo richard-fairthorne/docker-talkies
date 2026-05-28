@@ -6,14 +6,14 @@
 - `linux/amd64` host (no arm64 images — `nemo_toolkit[asr]` + chain doesn't resolve cleanly on aarch64)
 - Optional: NVIDIA GPU + NVIDIA Container Toolkit for the CUDA image
 - ~3 GB disk for the CPU image, ~9 GB for the CUDA image
-- ~12 GB additional disk for model weights (CPU image set) or ~29 GB (full CUDA set)
+- ~13 GB additional disk for model weights (CPU image set, includes Kokoro ~330 MB) or ~30 GB (full CUDA set)
 - ~4 GB RAM minimum (whisper-large-v3 needs the working set + overhead); 12 GB+ VRAM for the GPU-only models
 
 ## Quick Install
 
 ### CPU
 
-Serves 3× Whisper + `canary-180m-flash`. The CUDA-only models aren't worth running on CPU.
+Serves 3× Whisper + `canary-180m-flash` for ASR, plus `kokoro-82m` for TTS. The CUDA-only ASR models aren't worth running on CPU.
 
 ```bash
 docker run -d --name talkies \
@@ -24,7 +24,7 @@ docker run -d --name talkies \
 
 ### CUDA
 
-Serves all seven models. Requires the NVIDIA Container Toolkit on the host.
+Serves all seven ASR models plus `kokoro-82m` TTS. Requires the NVIDIA Container Toolkit on the host.
 
 ```bash
 docker run -d --name talkies \
@@ -38,16 +38,18 @@ The CUDA image also runs without `--gpus all` — it binds to CPU, ignores CUDA 
 
 **Verify:** `curl http://localhost:8000/healthz` returns `{"ok": true, "device": "...", "models": [...]}` once boot's done.
 
-**First boot:** the entrypoint downloads every model in `models.json` into `/data/models/<slug>/`. CPU set is ~12 GB, CUDA full set is ~29 GB. Bind-mount `/data` so subsequent restarts are no-ops. Restrict the download set with `TALKIES_ENABLED_MODELS` to avoid pulling everything.
+**First boot:** the entrypoint downloads every model in `models.json` into `/data/models/<slug>/`. CPU set is ~13 GB (includes Kokoro), CUDA full set is ~30 GB. Bind-mount `/data` so subsequent restarts are no-ops. Restrict the download set with `TALKIES_ENABLED_MODELS` to avoid pulling everything.
 
 ## CPU vs CUDA Images
 
 | Image | Tag | Platforms | Models served | Image size |
 |---|---|---|---|---|
-| CPU | `psyb0t/talkies:latest` | `linux/amd64` | 3× Whisper, 1× Canary-180m-Flash | ~3 GB |
-| CUDA | `psyb0t/talkies:latest-cuda` | `linux/amd64` | all seven | ~9 GB |
+| CPU | `psyb0t/talkies:latest` | `linux/amd64` | 3× Whisper, 1× Canary-180m-Flash, Kokoro-82M | ~3 GB |
+| CUDA | `psyb0t/talkies:latest-cuda` | `linux/amd64` | all seven ASR + Kokoro-82M | ~9 GB |
 
-The CPU image only ships models that actually finish in a sane time without a GPU. Parakeet-TDT is autoregressive (slow on CPU). Canary-1B and Canary-Qwen-2.5B are flat-out too big. Use the CUDA image for those even if you mostly run on CPU — it gracefully falls back.
+The CPU image only ships ASR models that actually finish in a sane time without a GPU. Parakeet-TDT is autoregressive (slow on CPU). Canary-1B and Canary-Qwen-2.5B are flat-out too big. Use the CUDA image for those even if you mostly run on CPU — it gracefully falls back. Kokoro-82M ships in both images — at 82M params it synthesizes faster than real-time on a 4-core CPU, no GPU needed.
+
+Both images bake `espeak-ng` into the runtime layer because Kokoro's G2P for es/fr/hi/it/pt routes through it via `misaki.espeak.EspeakG2P`. The Python `kokoro==0.9.4` package and its lightweight dependency chain (`misaki`, no `[ja]` / `[zh]` extras) are pinned alongside the rest of the ML stack in `Dockerfile` / `Dockerfile.cuda`.
 
 ## Environment Variables
 
@@ -186,12 +188,19 @@ File structure:
 ```json
 {
   "models": {
-    "your-slug": {
+    "your-asr-slug": {
       "repo": "huggingface-org/repo-name",
       "executor": "whisper",
       "default_source_lang": "en",
       "default_target_lang": "en",
       "default_task": "asr",
+      "languages": ["en"]
+    },
+    "your-tts-slug": {
+      "repo": "huggingface-org/tts-repo-name",
+      "executor": "kokoro",
+      "modality": "tts",
+      "default_voice": "af_heart",
       "languages": ["en"]
     }
   }
@@ -201,10 +210,12 @@ File structure:
 | Field | Required | Notes |
 |---|---|---|
 | `repo` | yes | HuggingFace repo id. Pulled via `snapshot_download(local_dir=$TALKIES_DATA_DIR/models/<slug>)` — flat directory keyed by slug, no HF cache indirection. |
-| `executor` | yes | One of `whisper`, `parakeet`, `canary_multitask`, `canary_salm`. Other values fail startup. |
-| `default_source_lang` | no | Used when the request omits `language`. |
-| `default_target_lang` | no | Used by Canary multitask for translation tasks. |
-| `default_task` | no | `asr` (transcribe) or `s2t_translation` (Canary multitask only). Default `asr`. |
+| `executor` | yes | One of `whisper`, `parakeet`, `canary_multitask`, `canary_salm`, `kokoro`. Other values fail startup. |
+| `modality` | no | `asr` (default) or `tts`. Drives endpoint guards (`/v1/audio/transcriptions` requires ASR; `/v1/audio/speech` requires TTS) and the `modality` field on `/v1/models` entries. The `kokoro` executor implies `tts`; the four ASR executors imply `asr`. |
+| `default_source_lang` | no | ASR only. Used when the request omits `language`. |
+| `default_target_lang` | no | ASR only. Used by Canary multitask for translation tasks. |
+| `default_task` | no | ASR only. `asr` (transcribe) or `s2t_translation` (Canary multitask only). Default `asr`. |
+| `default_voice` | no | TTS only. Used when the request omits `voice`. Falls back to the first voice the backend reports. |
 | `languages` | no | Informational only — listed in error messages, not enforced. |
 | `dependencies` | no | List of extra HuggingFace repo ids the executor needs at load time (e.g. `canary-qwen-2.5b` instantiates a Qwen3 tokenizer separately). Each is `snapshot_download`'d into the standard HF cache (`HF_HOME`) at entrypoint. |
 

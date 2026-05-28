@@ -40,6 +40,13 @@
       "default_task": "asr",
       "languages": ["en"],
       "dependencies": ["Qwen/Qwen3-1.7B"]
+    },
+    "kokoro-82m": {
+      "repo": "hexgrad/Kokoro-82M",
+      "executor": "kokoro",
+      "modality": "tts",
+      "default_voice": "af_heart",
+      "languages": ["en", "es", "fr", "hi", "it", "pt"]
     }
   }
 }
