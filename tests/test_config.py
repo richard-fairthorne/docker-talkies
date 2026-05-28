@@ -1,0 +1,172 @@
+"""Unit tests for talkies.config — env parsing + load_registry() filtering.
+
+These hit pure-python paths only; no ML deps required. They reload the
+config module under different env-var setups, so each test patches the
+environment and forces a fresh import.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+
+def _reload_config(monkeypatch, models_path: Path, **env: str):
+    """Reload talkies.config with a specific MODELS_FILE + env. Returns the module."""
+    monkeypatch.setenv("TALKIES_MODELS_FILE", str(models_path))
+    # Reset everything that load_registry cares about so previous tests
+    # can't leak filters into this one.
+    for var in ("TALKIES_ENABLED_MODELS", "TALKIES_PRELOAD"):
+        monkeypatch.delenv(var, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    sys.modules.pop("talkies.config", None)
+    return importlib.import_module("talkies.config")
+
+
+@pytest.fixture
+def fake_registry(tmp_path: Path) -> Path:
+    """Write a minimal but valid models.json that mirrors the real schema."""
+    p = tmp_path / "models.json"
+    p.write_text(json.dumps({
+        "models": {
+            "whisper-tiny": {"repo": "openai/whisper-tiny", "executor": "whisper"},
+            "parakeet-mini": {"repo": "nvidia/parakeet-mini", "executor": "parakeet"},
+            "canary-tiny": {
+                "repo": "nvidia/canary-tiny",
+                "executor": "canary_multitask",
+                "default_task": "asr",
+                "default_source_lang": "en",
+                "default_target_lang": "en",
+            },
+        }
+    }))
+    return p
+
+
+# ── ENABLED_MODELS env parsing ───────────────────────────────────────────────
+
+def test_enabled_models_empty_means_all(monkeypatch, fake_registry):
+    cfg = _reload_config(monkeypatch, fake_registry)
+    assert cfg.ENABLED_MODELS == []
+    reg = cfg.load_registry()
+    assert set(reg) == {"whisper-tiny", "parakeet-mini", "canary-tiny"}
+
+
+def test_enabled_models_filters_registry(monkeypatch, fake_registry):
+    cfg = _reload_config(
+        monkeypatch, fake_registry,
+        TALKIES_ENABLED_MODELS="whisper-tiny,canary-tiny",
+    )
+    assert cfg.ENABLED_MODELS == ["whisper-tiny", "canary-tiny"]
+    reg = cfg.load_registry()
+    assert set(reg) == {"whisper-tiny", "canary-tiny"}
+    # Filtered-out slug must not survive the filter
+    assert "parakeet-mini" not in reg
+
+
+def test_enabled_models_preserves_order(monkeypatch, fake_registry):
+    cfg = _reload_config(
+        monkeypatch, fake_registry,
+        TALKIES_ENABLED_MODELS="canary-tiny,whisper-tiny",
+    )
+    reg = cfg.load_registry()
+    assert list(reg) == ["canary-tiny", "whisper-tiny"]
+
+
+def test_enabled_models_trims_whitespace_and_blanks(monkeypatch, fake_registry):
+    cfg = _reload_config(
+        monkeypatch, fake_registry,
+        TALKIES_ENABLED_MODELS=" whisper-tiny , , canary-tiny ,",
+    )
+    assert cfg.ENABLED_MODELS == ["whisper-tiny", "canary-tiny"]
+
+
+def test_enabled_models_unknown_slug_fails_fast(monkeypatch, fake_registry):
+    cfg = _reload_config(
+        monkeypatch, fake_registry,
+        TALKIES_ENABLED_MODELS="whisper-tiny,does-not-exist",
+    )
+    with pytest.raises(ValueError, match="does-not-exist"):
+        cfg.load_registry()
+
+
+def test_enabled_models_all_unknown_fails_fast(monkeypatch, fake_registry):
+    cfg = _reload_config(
+        monkeypatch, fake_registry,
+        TALKIES_ENABLED_MODELS="nope-a,nope-b",
+    )
+    with pytest.raises(ValueError, match=r"nope-a.*nope-b|nope-b.*nope-a"):
+        cfg.load_registry()
+
+
+# ── load_registry schema validation (unchanged behavior, still covered) ──────
+
+def test_load_registry_missing_file_raises(monkeypatch, tmp_path):
+    missing = tmp_path / "no-such-file.json"
+    cfg = _reload_config(monkeypatch, missing)
+    with pytest.raises(FileNotFoundError):
+        cfg.load_registry()
+
+
+def test_load_registry_bad_top_level_raises(monkeypatch, tmp_path):
+    p = tmp_path / "models.json"
+    p.write_text(json.dumps(["not", "an", "object"]))
+    cfg = _reload_config(monkeypatch, p)
+    with pytest.raises(ValueError, match="top-level"):
+        cfg.load_registry()
+
+
+def test_load_registry_unknown_executor_raises(monkeypatch, tmp_path):
+    p = tmp_path / "models.json"
+    p.write_text(json.dumps({
+        "models": {"x": {"repo": "foo/bar", "executor": "telepathy"}}
+    }))
+    cfg = _reload_config(monkeypatch, p)
+    with pytest.raises(ValueError, match="telepathy"):
+        cfg.load_registry()
+
+
+def test_load_registry_missing_repo_raises(monkeypatch, tmp_path):
+    p = tmp_path / "models.json"
+    p.write_text(json.dumps({"models": {"x": {"executor": "whisper"}}}))
+    cfg = _reload_config(monkeypatch, p)
+    with pytest.raises(ValueError, match="missing 'repo'"):
+        cfg.load_registry()
+
+
+# ── duration parser smoke ─────────────────────────────────────────────────────
+
+def test_duration_env_accepts_bare_seconds(monkeypatch, fake_registry):
+    cfg = _reload_config(monkeypatch, fake_registry, TALKIES_MODEL_TTL="120")
+    assert cfg.MODEL_IDLE_TIMEOUT_SECONDS == 120.0
+
+
+def test_duration_env_accepts_go_style(monkeypatch, fake_registry):
+    cfg = _reload_config(monkeypatch, fake_registry, TALKIES_MODEL_TTL="1h30m5s")
+    assert cfg.MODEL_IDLE_TIMEOUT_SECONDS == 3600 + 30 * 60 + 5
+
+
+def test_duration_env_rejects_garbage(monkeypatch, fake_registry):
+    monkeypatch.setenv("TALKIES_MODELS_FILE", str(fake_registry))
+    monkeypatch.setenv("TALKIES_MODEL_TTL", "yesterday")
+    sys.modules.pop("talkies.config", None)
+    with pytest.raises(ValueError, match="TALKIES_MODEL_TTL"):
+        importlib.import_module("talkies.config")
+
+
+def test_device_rejects_garbage(monkeypatch, fake_registry):
+    monkeypatch.setenv("TALKIES_MODELS_FILE", str(fake_registry))
+    monkeypatch.setenv("TALKIES_DEVICE", "potato")
+    sys.modules.pop("talkies.config", None)
+    with pytest.raises(ValueError, match="TALKIES_DEVICE"):
+        importlib.import_module("talkies.config")
+
+
+def test_device_accepts_cuda_n(monkeypatch, fake_registry):
+    cfg = _reload_config(monkeypatch, fake_registry, TALKIES_DEVICE="cuda:1")
+    assert cfg.DEVICE == "cuda:1"

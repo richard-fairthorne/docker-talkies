@@ -1,0 +1,24 @@
+{
+  "models": {
+    "whisper-large-v3": {
+      "repo": "Systran/faster-whisper-large-v3",
+      "executor": "whisper"
+    },
+    "whisper-large-v3-turbo": {
+      "repo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+      "executor": "whisper"
+    },
+    "distil-whisper-large-v3": {
+      "repo": "Systran/faster-distil-whisper-large-v3",
+      "executor": "whisper"
+    },
+    "canary-180m-flash": {
+      "repo": "nvidia/canary-180m-flash",
+      "executor": "canary_multitask",
+      "default_source_lang": "en",
+      "default_target_lang": "en",
+      "default_task": "asr",
+      "languages": ["en"]
+    }
+  }
+}

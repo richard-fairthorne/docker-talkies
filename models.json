@@ -1,0 +1,45 @@
+{
+  "models": {
+    "whisper-large-v3": {
+      "repo": "Systran/faster-whisper-large-v3",
+      "executor": "whisper"
+    },
+    "whisper-large-v3-turbo": {
+      "repo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+      "executor": "whisper"
+    },
+    "distil-whisper-large-v3": {
+      "repo": "Systran/faster-distil-whisper-large-v3",
+      "executor": "whisper"
+    },
+    "parakeet-tdt-0.6b-v3": {
+      "repo": "nvidia/parakeet-tdt-0.6b-v3",
+      "executor": "parakeet"
+    },
+    "canary-180m-flash": {
+      "repo": "nvidia/canary-180m-flash",
+      "executor": "canary_multitask",
+      "default_source_lang": "en",
+      "default_target_lang": "en",
+      "default_task": "asr",
+      "languages": ["en"]
+    },
+    "canary-1b-flash": {
+      "repo": "nvidia/canary-1b-flash",
+      "executor": "canary_multitask",
+      "default_source_lang": "en",
+      "default_target_lang": "en",
+      "default_task": "asr",
+      "languages": ["en", "de", "fr", "es"]
+    },
+    "canary-qwen-2.5b": {
+      "repo": "nvidia/canary-qwen-2.5b",
+      "executor": "canary_salm",
+      "default_source_lang": "en",
+      "default_target_lang": "en",
+      "default_task": "asr",
+      "languages": ["en"],
+      "dependencies": ["Qwen/Qwen3-1.7B"]
+    }
+  }
+}

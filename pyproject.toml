@@ -1,0 +1,42 @@
+[project]
+name = "talkies"
+version = "0.1.0"
+description = "Unified ASR service — OpenAI-compatible /v1/audio/transcriptions over Whisper + Parakeet + Canary with VAD chunking and full Whisper-shape timestamps"
+license = { text = "WTFPL" }
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "psyb0t" }]
+keywords = ["asr", "speech-to-text", "whisper", "parakeet", "canary", "nemo", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+# Lightweight runtime deps only — heavy ML stack (torch + nemo_toolkit[asr])
+# installed via Dockerfile because:
+#   1. torch flavor (CPU vs CUDA) is chosen by --index-url at install time,
+#      can't pin both in one uv.lock
+#   2. NeMo's transitive resolution is fragile + slow; we install with explicit
+#      pins from the hash-locked requirements file.
+dependencies = [
+    "fastapi==0.136.1",
+    "uvicorn==0.47.0",
+    "pydantic==2.13.4",
+    "python-multipart==0.0.20",
+]
+
+[project.urls]
+Homepage = "https://github.com/psyb0t/docker-talkies"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/talkies"]
+
+[tool.uv]
+exclude-newer = "2026-05-27T00:00:00Z"

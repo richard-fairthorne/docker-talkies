@@ -1,0 +1,3 @@
+# Drop a short audio file here named `audio.wav`, `audio.mp3`, `audio.m4a`,
+# `audio.flac`, or `audio.ogg`. The integration tests pick it up automatically.
+# Keep it under ~10 seconds and well under the 100 MB upload cap.
