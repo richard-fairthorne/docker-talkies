@@ -1,6 +1,6 @@
 # talkies
 
-> One HTTP service. Seven ASR models. One OpenAI-compatible endpoint. Zero ceremony, zero excuses.
+> Self-hosted `/v1/audio/transcriptions` that fronts seven open ASR models behind OpenAI's wire format. Point your existing OpenAI client at it, change the model slug, and you're done.
 
 `POST /v1/audio/transcriptions` with a multipart `file` + a `model` slug → text back. Same wire shape as OpenAI. The same client you point at `api.openai.com/v1/audio/transcriptions` works here, you just change the base URL and the slug. That's the entire story.
 
