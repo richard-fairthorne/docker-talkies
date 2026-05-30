@@ -44,6 +44,13 @@
       "default_voice": "af_heart",
       "languages": ["en", "es", "fr", "hi", "it", "pt"]
     },
+    "kokoro-82m-nvidia": {
+      "repo": "nvidia/kokoro-82M-onnx-opt",
+      "executor": "kokoro_nvidia",
+      "modality": "tts",
+      "default_voice": "af_heart",
+      "languages": ["en", "es", "fr", "hi", "it", "pt"]
+    },
     "qwen3-tts-0.6b": {
       "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
       "executor": "qwen3_tts",

@@ -1,16 +1,17 @@
 #!/bin/bash
 # shellcheck shell=bash
-# Shared helpers for talkies integration tests.
+# HTTP helpers + assertions shared across talkies integration test files.
 #
-# Unlike the aigate harness this doesn't `docker compose exec` into a sidecar
-# — the test runner starts the talkies container with a published port and
-# we hit http://127.0.0.1:$TALKIES_TEST_PORT directly.
-
-TALKIES_TEST_PORT="${TALKIES_TEST_PORT:-18000}"
-TALKIES_BASE_URL="http://127.0.0.1:${TALKIES_TEST_PORT}"
-
-# shellcheck disable=SC2034  # populated by test_*.sh files, consumed by run.sh
-ALL_TESTS=()
+# Container lifecycle lives in harness.sh — this file is just transport
+# helpers that talk to whatever $TALKIES_BASE_URL points at. Source order
+# in a test file:
+#
+#     source harness.sh
+#     source common.sh
+#     harness_start "..."
+#
+# (Sourcing common.sh after harness.sh ensures TALKIES_BASE_URL is in scope
+# for any helper that reads it lazily.)
 
 # ── assertions ───────────────────────────────────────────────────────────────
 
@@ -122,7 +123,6 @@ talkies_speech() {
         body=$(jq -n --arg m "$model" --arg v "$voice" --arg t "$text" --arg f "$fmt" \
             '{model:$m, voice:$v, input:$t, response_format:$f}') || return 2
     else
-        # Omit voice → server uses model.default_voice.
         body=$(jq -n --arg m "$model" --arg t "$text" --arg f "$fmt" \
             '{model:$m, input:$t, response_format:$f}') || return 2
     fi
@@ -139,11 +139,11 @@ talkies_speech() {
 }
 
 # Return the first slug from the preference list that's actually configured on
-# the running server (read from /v1/models). Used by the cross-modality test
-# to pick a fast ASR backend for round-tripping Kokoro output regardless of
-# what TALKIES_ENABLED_MODELS happens to be.
+# the running server (read from /v1/models). Used by cross-modality tests to
+# pick a fast ASR backend for round-tripping TTS output regardless of what
+# HARNESS_ENABLED_MODELS happens to be.
 talkies_pick_fast_asr_model() {
-    local models_json prefer slug
+    local models_json prefer
     models_json=$(talkies_get "/v1/models") || return 1
     for prefer in parakeet-tdt-0.6b-v3 whisper-large-v3-turbo canary-180m-flash whisper-large-v3; do
         if echo "$models_json" | jq -e --arg p "$prefer" '.data[] | select(.id==$p)' >/dev/null 2>&1; then
@@ -154,10 +154,9 @@ talkies_pick_fast_asr_model() {
     return 1
 }
 
-# Normalize transcribed text for fuzzy comparison: lowercase, strip
-# punctuation, collapse whitespace. ASR output has leading spaces, varying
-# capitalisation, sometimes inserted commas/periods — none of which we care
-# about for word-presence assertions.
+# Lowercase + strip punctuation + collapse whitespace. ASR output varies in
+# capitalisation + comma placement, none of which we care about for
+# word-presence assertions.
 talkies_normalize_text() {
     tr '[:upper:]' '[:lower:]' \
         | tr -d '.,!?;:"()[]{}' \
@@ -169,45 +168,18 @@ talkies_normalize_text() {
 # Returns the path on stdout, empty string if none.
 talkies_find_fixture() {
     local dir="${BASH_SOURCE%/*}/.fixtures"
-    local ext fixture=""
+    local ext
     for ext in wav mp3 m4a flac ogg; do
         if [ -f "${dir}/audio.${ext}" ]; then
-            fixture="${dir}/audio.${ext}"
-            break
-        fi
-    done
-    echo "$fixture"
-}
-
-# Wait until the talkies /healthz endpoint comes back ok.
-# Long timeout because the first boot has to download N models.
-talkies_wait_ready() {
-    local max="${1:-1800}"  # 30 min cap on first boot
-    local i=0
-    while [ "$i" -lt "$max" ]; do
-        if curl -sf --max-time 5 "${TALKIES_BASE_URL}/healthz" >/dev/null 2>&1; then
+            echo "${dir}/audio.${ext}"
             return 0
         fi
-        sleep 2
-        i=$((i + 2))
     done
-    echo "  TIMEOUT: ${TALKIES_BASE_URL}/healthz never became ready in ${max}s" >&2
-    return 1
+    echo ""
 }
 
-# Models we expect /v1/models to expose, derived from TALKIES_ENABLED_MODELS
-# (or all CUDA models when that's empty — but the runner pins it).
-talkies_expected_models() {
-    if [ -n "${TALKIES_ENABLED_MODELS:-}" ]; then
-        echo "$TALKIES_ENABLED_MODELS" | tr ',' ' '
-        return
-    fi
-    # Default CUDA full set, matches models.json.
-    echo "whisper-large-v3 whisper-large-v3-turbo parakeet-tdt-0.6b-v3 canary-180m-flash canary-1b-flash canary-qwen-2.5b qwen3-tts-0.6b"
-}
-
-# Subset of the expected models that are ASR (modality=asr per /v1/models).
-# Used by the per-model transcribe tests so they don't try to ASR a TTS slug.
+# ASR-modality model slugs actually live on the running server. Derived from
+# /v1/models so tests don't need to hardcode which slugs the operator enabled.
 talkies_expected_asr_models() {
     local models_json
     models_json=$(talkies_get "/v1/models") || return 1

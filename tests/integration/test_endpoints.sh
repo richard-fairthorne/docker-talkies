@@ -1,8 +1,22 @@
 #!/bin/bash
-# shellcheck shell=bash disable=SC2154  # ALL_TESTS comes from common.sh
+# Fast endpoint smoke tests — no transcription, no model loading.
+# Self-contained: spawns its own --rm --gpus all container via the harness,
+# tears it down on exit. Invoke directly: bash tests/integration/test_endpoints.sh
 
-# Fast endpoint smoke tests — no transcription, no model loading. Verifies
-# the HTTP surface is wired up and the registry is sane.
+set -eo pipefail
+
+_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=harness.sh
+source "${_DIR}/harness.sh"
+# shellcheck source=common.sh
+source "${_DIR}/common.sh"
+
+# Smoke tests don't actually invoke any model, but the server registry needs
+# entries to validate against. One light ASR slug is enough — kept minimal so
+# the prefetch+boot cost is the smallest of any test file.
+ENDPOINTS_MODELS="whisper-large-v3-turbo"
+
+harness_start "$ENDPOINTS_MODELS"
 
 # ── /healthz reachable, returns the configured model_ids ─────────────────────
 
@@ -10,7 +24,7 @@ test_talkies_healthz() {
     local out mid
     out=$(talkies_get "/healthz") || { echo "  FAIL: /healthz unreachable"; return 1; }
     assert_contains "$out" "\"ok\":true" "/healthz ok=true" || return 1
-    for mid in $(talkies_expected_models); do
+    for mid in ${HARNESS_ENABLED_MODELS//,/ }; do
         assert_contains "$out" "$mid" "/healthz lists $mid" || return 1
     done
     echo "OK: talkies_healthz"
@@ -22,7 +36,7 @@ test_talkies_models_list() {
     local out mid
     out=$(talkies_get "/v1/models") || { echo "  FAIL: /v1/models unreachable"; return 1; }
     assert_contains "$out" "\"object\":\"list\"" "/v1/models openai shape" || return 1
-    for mid in $(talkies_expected_models); do
+    for mid in ${HARNESS_ENABLED_MODELS//,/ }; do
         assert_contains "$out" "\"$mid\"" "/v1/models has $mid" || return 1
     done
     echo "OK: talkies_models_list"
@@ -88,12 +102,11 @@ test_talkies_transcribe_unknown_model_returns_404() {
     echo "OK: talkies_transcribe_unknown_model_returns_404"
 }
 
-ALL_TESTS+=(
-    test_talkies_healthz
-    test_talkies_models_list
-    test_talkies_api_ps
-    test_talkies_unload_all
-    test_talkies_delete_unknown_returns_404
-    test_talkies_transcribe_missing_file_returns_400
+harness_run_tests \
+    test_talkies_healthz \
+    test_talkies_models_list \
+    test_talkies_api_ps \
+    test_talkies_unload_all \
+    test_talkies_delete_unknown_returns_404 \
+    test_talkies_transcribe_missing_file_returns_400 \
     test_talkies_transcribe_unknown_model_returns_404
-)

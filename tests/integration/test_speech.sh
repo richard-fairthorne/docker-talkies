@@ -1,63 +1,51 @@
 #!/bin/bash
-# shellcheck shell=bash disable=SC2154  # ALL_TESTS comes from common.sh
+# TTS integration tests — both kokoro slugs (PyTorch + ONNX/ORT) via
+# /v1/audio/speech, with a fast ASR for the cross-modality round-trip.
+# Self-contained: spawns its own --rm --gpus all container via the harness,
+# tears it down on exit. Invoke directly: bash tests/integration/test_speech.sh
 
-# TTS integration tests — Kokoro via /v1/audio/speech. CUDA-only suite, but
-# Kokoro itself ships in both images; we run here because the harness is
-# already CUDA and the cross-modality round-trip wants a fast ASR backend.
-#
-# Skips cleanly if kokoro-82m is filtered out by TALKIES_ENABLED_MODELS so the
-# rest of the suite still runs.
+set -eo pipefail
+
+_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=harness.sh
+source "${_DIR}/harness.sh"
+# shellcheck source=common.sh
+source "${_DIR}/common.sh"
+
+SPEECH_MODELS="whisper-large-v3-turbo,kokoro-82m,kokoro-82m-nvidia"
+harness_start "$SPEECH_MODELS"
 
 TTS_MODEL="kokoro-82m"
+TTS_MODEL_NVIDIA="kokoro-82m-nvidia"
 
-# Phrase chosen for the round-trip test: short, common English words, no
-# rare proper nouns. Stays well within Kokoro's typical synthesis quality
-# envelope so the ASR-side assertions aren't flaky.
+# Round-trip phrase: short, common English words. Stays within Kokoro's
+# typical synthesis envelope so ASR-side assertions aren't flaky.
 TTS_TEST_PHRASE="The quick brown fox jumps over the lazy dog."
-
-# Words we require to be present in the round-tripped transcript (lowercased,
-# punctuation-stripped). Picked to be unambiguous tokens unlikely to be
-# misheard ("the" / "over" excluded — too generic, common ASR filler).
 TTS_EXPECTED_WORDS=(quick brown fox jumps lazy dog)
 
-# Pre-flight: is the TTS model actually loadable on this server? If the
-# operator restricted TALKIES_ENABLED_MODELS to ASR-only slugs, skip cleanly.
-_tts_model_available() {
-    local models_json
-    models_json=$(talkies_get "/v1/models") || return 1
-    echo "$models_json" | jq -e --arg m "$TTS_MODEL" '.data[] | select(.id==$m)' >/dev/null 2>&1
-}
+# ── shared helpers ───────────────────────────────────────────────────────────
 
-# ── GET /v1/audio/voices returns a non-empty list ────────────────────────────
-
-test_talkies_voices_list() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models (TALKIES_ENABLED_MODELS excludes it)"
-        return 0
-    fi
+_speech_voices_list_for_slug() {
+    local slug="$1"
     local out count default_count
-    out=$(talkies_get "/v1/audio/voices") || { echo "  FAIL: /v1/audio/voices unreachable"; return 1; }
-    count=$(echo "$out" | jq '.voices | length' 2>/dev/null || echo 0)
-    if [ "$count" -lt 1 ]; then
-        echo "  FAIL: /v1/audio/voices empty (count=$count)"
+    out=$(talkies_get "/v1/audio/voices") || {
+        echo "  FAIL: /v1/audio/voices unreachable"
         return 1
-    fi
-    default_count=$(echo "$out" | jq '[.voices[] | select(.default==true)] | length' 2>/dev/null || echo 0)
-    if [ "$default_count" -lt 1 ]; then
-        echo "  FAIL: no voice marked default=true"
-        return 1
-    fi
-    echo "  ok: voices=$count default=$default_count"
-    echo "OK: talkies_voices_list"
+    }
+    count=$(echo "$out" \
+        | jq --arg m "$slug" '[.voices[] | select(.model==$m)] | length' \
+        2>/dev/null || echo 0)
+    [ "$count" -ge 1 ] || { echo "  FAIL: 0 voices for $slug"; return 1; }
+    default_count=$(echo "$out" \
+        | jq --arg m "$slug" '[.voices[] | select(.model==$m and .default==true)] | length' \
+        2>/dev/null || echo 0)
+    [ "$default_count" -ge 1 ] || { echo "  FAIL: $slug has no default voice"; return 1; }
+    echo "  ok: $slug voices=$count default=$default_count"
+    return 0
 }
 
-# ── POST /v1/audio/speech with each format → non-zero bytes + correct magic ──
-
-test_talkies_speech_all_formats() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
+_speech_all_formats_for_slug() {
+    local slug="$1"
     local rc=0 fmt outfile size head4 head2
     local tmp
     tmp=$(mktemp -d -t talkies_speech.XXXXXX) || return 2
@@ -66,247 +54,220 @@ test_talkies_speech_all_formats() {
 
     for fmt in mp3 opus aac flac wav pcm; do
         outfile="${tmp}/out.${fmt}"
-        if ! talkies_speech "$TTS_MODEL" "" "Hello world." "$fmt" "$outfile"; then
-            echo "  FAIL: $fmt synthesis"
-            rc=1
-            continue
+        if ! talkies_speech "$slug" "" "Hello world." "$fmt" "$outfile"; then
+            echo "  FAIL: $slug $fmt synthesis"; rc=1; continue
         fi
         size=$(stat -c %s "$outfile" 2>/dev/null || stat -f %z "$outfile" 2>/dev/null || echo 0)
         if [ "$size" -lt 1024 ]; then
-            echo "  FAIL: $fmt suspiciously small ($size bytes — likely an error page or empty body)"
-            rc=1
-            continue
+            echo "  FAIL: $slug $fmt suspiciously small ($size bytes)"; rc=1; continue
         fi
         head4=$(head -c 4 "$outfile" | od -An -c | tr -d ' \n')
         head2=$(head -c 2 "$outfile" | od -An -tx1 | tr -d ' \n')
         case "$fmt" in
             wav)
-                if [ "$head4" != "RIFF" ]; then
-                    echo "  FAIL: wav missing RIFF header (got '$head4')"; rc=1; continue
-                fi
+                [ "$head4" = "RIFF" ] \
+                    || { echo "  FAIL: $slug wav missing RIFF (got '$head4')"; rc=1; continue; }
                 ;;
             flac)
-                if [ "$head4" != "fLaC" ]; then
-                    echo "  FAIL: flac missing fLaC magic (got '$head4')"; rc=1; continue
-                fi
+                [ "$head4" = "fLaC" ] \
+                    || { echo "  FAIL: $slug flac missing fLaC (got '$head4')"; rc=1; continue; }
                 ;;
             opus)
-                if [ "$head4" != "OggS" ]; then
-                    echo "  FAIL: opus missing OggS container magic (got '$head4')"; rc=1; continue
-                fi
+                [ "$head4" = "OggS" ] \
+                    || { echo "  FAIL: $slug opus missing OggS (got '$head4')"; rc=1; continue; }
                 ;;
             aac)
-                # ADTS sync word: first 12 bits = 0xFFF. Byte 0 = 0xFF, byte 1
-                # high nibble = 0xF.
+                # ADTS sync: first 12 bits = 0xFFF.
                 if [ "${head2:0:2}" != "ff" ] || [ "${head2:2:1}" != "f" ]; then
-                    echo "  FAIL: aac missing ADTS sync word (got '$head2')"; rc=1; continue
+                    echo "  FAIL: $slug aac missing ADTS (got '$head2')"; rc=1; continue
                 fi
                 ;;
             mp3)
-                # ID3v2 prefix ("ID3") OR MPEG frame sync (0xFFFB / 0xFFFA /
-                # 0xFFF3 / 0xFFF2 — first 11 bits set, layer III).
+                # ID3v2 ("ID3") OR MPEG frame sync (0xFFFB / 0xFFFA / 0xFFF3 / 0xFFF2).
                 if [ "${head4:0:3}" != "ID3" ] && [ "${head2:0:2}" != "ff" ]; then
-                    echo "  FAIL: mp3 missing ID3 / frame sync (got '$head4'/'$head2')"; rc=1; continue
+                    echo "  FAIL: $slug mp3 missing ID3/frame-sync (got '$head4'/'$head2')"; rc=1; continue
                 fi
                 ;;
-            pcm)
-                # Raw s16le, no container. Size check above is the only signal.
-                :
-                ;;
+            pcm) : ;;  # raw s16le, only size matters
         esac
-        echo "  ok: $fmt size=${size}B head4='$head4'"
+        echo "  ok: $slug $fmt size=${size}B head4='$head4'"
     done
-
-    if [ "$rc" -eq 0 ]; then
-        echo "OK: talkies_speech_all_formats"
-    fi
     return $rc
 }
 
-# ── Default voice fallback: voice omitted → server uses model default ───────
-
-test_talkies_speech_default_voice() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
+_speech_default_voice_for_slug() {
+    local slug="$1"
     local outfile size
     outfile=$(mktemp -t talkies_default.XXXXXX) || return 2
     # shellcheck disable=SC2064
     trap "rm -f '$outfile'" RETURN
-
-    if ! talkies_speech "$TTS_MODEL" "" "Default voice test." "wav" "$outfile"; then
-        echo "  FAIL: synthesis with omitted voice"
-        return 1
+    if ! talkies_speech "$slug" "" "Default voice test." "wav" "$outfile"; then
+        echo "  FAIL: $slug synthesis with omitted voice"; return 1
     fi
     size=$(stat -c %s "$outfile" 2>/dev/null || stat -f %z "$outfile" 2>/dev/null || echo 0)
-    if [ "$size" -lt 1024 ]; then
-        echo "  FAIL: default-voice output suspiciously small ($size bytes)"
-        return 1
-    fi
-    echo "  ok: default-voice wav size=${size}B"
-    echo "OK: talkies_speech_default_voice"
+    [ "$size" -ge 1024 ] \
+        || { echo "  FAIL: $slug default-voice wav too small ($size bytes)"; return 1; }
+    echo "  ok: $slug default-voice wav size=${size}B"
+    return 0
 }
 
-# ── Error path: unknown voice → 400 ──────────────────────────────────────────
-
-test_talkies_speech_unknown_voice_400() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
+_speech_unknown_voice_for_slug() {
+    local slug="$1"
     local body code
-    body=$(jq -n --arg m "$TTS_MODEL" \
+    body=$(jq -n --arg m "$slug" \
         '{model:$m, voice:"this_voice_does_not_exist", input:"hi", response_format:"wav"}')
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -H "Content-Type: application/json" -d "$body" \
         "${TALKIES_BASE_URL}/v1/audio/speech")
-    assert_eq "$code" "400" "unknown voice → 400" || return 1
-    echo "OK: talkies_speech_unknown_voice_400"
+    assert_eq "$code" "400" "$slug unknown voice → 400" || return 1
+    return 0
 }
 
-# ── Error path: empty input → 400 ────────────────────────────────────────────
-
-test_talkies_speech_empty_input_400() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
+_speech_empty_input_for_slug() {
+    local slug="$1"
     local body code
-    body=$(jq -n --arg m "$TTS_MODEL" \
-        '{model:$m, input:"   ", response_format:"wav"}')
+    body=$(jq -n --arg m "$slug" '{model:$m, input:"   ", response_format:"wav"}')
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -H "Content-Type: application/json" -d "$body" \
         "${TALKIES_BASE_URL}/v1/audio/speech")
-    assert_eq "$code" "400" "empty input → 400" || return 1
-    echo "OK: talkies_speech_empty_input_400"
+    assert_eq "$code" "400" "$slug empty input → 400" || return 1
+    return 0
 }
 
-# ── Error path: ASR model posted to /v1/audio/speech → 400 ───────────────────
-
-test_talkies_speech_rejects_asr_model() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
-    local asr_model body code
-    asr_model=$(talkies_pick_fast_asr_model) || {
-        echo "  SKIP: no ASR model configured on server"
-        return 0
-    }
-    body=$(jq -n --arg m "$asr_model" \
-        '{model:$m, input:"hi", response_format:"wav"}')
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -H "Content-Type: application/json" -d "$body" \
-        "${TALKIES_BASE_URL}/v1/audio/speech")
-    assert_eq "$code" "400" "ASR slug on /v1/audio/speech → 400" || return 1
-    echo "OK: talkies_speech_rejects_asr_model"
-}
-
-# ── Error path: TTS model posted to /v1/audio/transcriptions → 400 ──────────
-
-test_talkies_transcribe_rejects_tts_model() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
-    local fixture
-    fixture=$(talkies_find_fixture)
-    if [ -z "$fixture" ]; then
-        echo "  SKIP: tests/integration/.fixtures/audio.* missing"
-        return 0
-    fi
-    local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -F "model=$TTS_MODEL" \
-        -F "file=@${fixture}" \
-        "${TALKIES_BASE_URL}/v1/audio/transcriptions")
-    assert_eq "$code" "400" "TTS slug on /v1/audio/transcriptions → 400" || return 1
-    echo "OK: talkies_transcribe_rejects_tts_model"
-}
-
-# ── Cross-modality round-trip: Kokoro → ASR → expected words present ────────
-#
-# Generates a WAV with a known phrase, feeds it back into a fast ASR backend,
-# checks the transcript contains the high-signal words. This catches:
-#   - Kokoro returning correct sample rate / channel layout (otherwise ASR
-#     output is gibberish even if the bytes are well-formed).
-#   - The ffmpeg encode path not corrupting the audio.
-#   - Sibling-eviction working both directions (Kokoro loaded → unloaded →
-#     ASR loaded — without OOM or stuck-resident state).
-
-test_talkies_speech_round_trip_through_asr() {
-    if ! _tts_model_available; then
-        echo "  SKIP: $TTS_MODEL not in /v1/models"
-        return 0
-    fi
+# The intelligibility check — synthesize a known phrase, transcribe back via
+# the fastest ASR available, assert every high-signal word from
+# TTS_EXPECTED_WORDS is in the transcript. Bytes-out + non-zero duration are
+# NOT the same as "the audio is the words we asked for".
+_speech_round_trip_for_slug() {
+    local slug="$1"
     local asr_model
     asr_model=$(talkies_pick_fast_asr_model) || {
-        echo "  SKIP: no fast ASR model available on server for round-trip"
-        return 0
+        echo "  SKIP: no fast ASR available on server"; return 0
     }
-    echo "  using asr_model=$asr_model"
+    echo "  using tts=$slug asr=$asr_model"
 
     local tmp wavfile
-    tmp=$(mktemp -d -t talkies_roundtrip.XXXXXX) || return 2
+    tmp=$(mktemp -d -t talkies_rt.XXXXXX) || return 2
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" RETURN
     wavfile="${tmp}/spoken.wav"
 
-    # Fresh slate: unload anything currently resident so the test exercises
-    # the cold-load → evict → cold-load path.
+    # Cold-load + evict path.
     talkies_method POST "/unload" >/dev/null 2>&1 || true
 
-    if ! talkies_speech "$TTS_MODEL" "af_heart" "$TTS_TEST_PHRASE" "wav" "$wavfile"; then
-        echo "  FAIL: kokoro synthesis"
-        return 1
+    if ! talkies_speech "$slug" "af_heart" "$TTS_TEST_PHRASE" "wav" "$wavfile"; then
+        echo "  FAIL: $slug synthesis"; return 1
     fi
     local size
     size=$(stat -c %s "$wavfile" 2>/dev/null || stat -f %z "$wavfile" 2>/dev/null || echo 0)
-    if [ "$size" -lt 4096 ]; then
-        echo "  FAIL: synthesized wav too small ($size bytes)"
-        return 1
-    fi
-    echo "  kokoro produced wav ($size bytes)"
+    [ "$size" -ge 4096 ] || { echo "  FAIL: $slug wav too small ($size bytes)"; return 1; }
+    echo "  $slug produced wav ($size bytes)"
 
-    # Round-trip back through ASR. Plain json, no diarization, no language hint
-    # (Whisper auto-detects; Parakeet/Canary default to English).
     local out text normalized
     out=$(talkies_transcribe "$asr_model" "$wavfile" "json") || {
-        echo "  FAIL: ASR round-trip transcribe via $asr_model"
-        return 1
+        echo "  FAIL: ASR transcribe via $asr_model"; return 1
     }
     text=$(echo "$out" | jq -r '.text' 2>/dev/null || echo "")
-    if [ -z "$text" ] || [ "$text" = "null" ]; then
-        echo "  FAIL: ASR returned empty text"
-        return 1
-    fi
+    [ -n "$text" ] && [ "$text" != "null" ] \
+        || { echo "  FAIL: ASR returned empty text"; return 1; }
     normalized=$(echo "$text" | talkies_normalize_text)
     echo "  transcribed: \"$normalized\""
 
     local missing=() word
     for word in "${TTS_EXPECTED_WORDS[@]}"; do
-        if [[ " $normalized " != *" $word "* ]]; then
-            missing+=("$word")
-        fi
+        [[ " $normalized " == *" $word "* ]] || missing+=("$word")
     done
     if [ "${#missing[@]}" -gt 0 ]; then
-        echo "  FAIL: round-trip transcript missing words: ${missing[*]}"
-        echo "  spoken phrase: \"$TTS_TEST_PHRASE\""
-        echo "  raw asr text:  \"$text\""
+        echo "  FAIL: $slug missing words: ${missing[*]}"
+        echo "  spoken: \"$TTS_TEST_PHRASE\""
+        echo "  raw:    \"$text\""
         return 1
     fi
     echo "  ok: all expected words present (${TTS_EXPECTED_WORDS[*]})"
-    echo "OK: talkies_speech_round_trip_through_asr"
+    return 0
 }
 
-ALL_TESTS+=(
-    test_talkies_voices_list
-    test_talkies_speech_all_formats
-    test_talkies_speech_default_voice
-    test_talkies_speech_unknown_voice_400
-    test_talkies_speech_empty_input_400
-    test_talkies_speech_rejects_asr_model
+# ── per-slug wrappers (stable test IDs for CI logs) ─────────────────────────
+
+# kokoro-82m (PyTorch)
+test_talkies_speech_voices_list()                { _speech_voices_list_for_slug   "$TTS_MODEL" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_all_formats()                { _speech_all_formats_for_slug   "$TTS_MODEL" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_default_voice()              { _speech_default_voice_for_slug "$TTS_MODEL" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_unknown_voice_400()          { _speech_unknown_voice_for_slug "$TTS_MODEL" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_empty_input_400()            { _speech_empty_input_for_slug   "$TTS_MODEL" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_round_trip_through_asr()     { _speech_round_trip_for_slug    "$TTS_MODEL" && echo "OK: $FUNCNAME"; }
+
+# kokoro-82m-nvidia (ONNX/ORT)
+test_talkies_speech_nvidia_voices_list()         { _speech_voices_list_for_slug   "$TTS_MODEL_NVIDIA" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_nvidia_all_formats()         { _speech_all_formats_for_slug   "$TTS_MODEL_NVIDIA" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_nvidia_default_voice()       { _speech_default_voice_for_slug "$TTS_MODEL_NVIDIA" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_nvidia_unknown_voice_400()   { _speech_unknown_voice_for_slug "$TTS_MODEL_NVIDIA" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_nvidia_empty_input_400()     { _speech_empty_input_for_slug   "$TTS_MODEL_NVIDIA" && echo "OK: $FUNCNAME"; }
+test_talkies_speech_round_trip_through_asr_nvidia(){ _speech_round_trip_for_slug  "$TTS_MODEL_NVIDIA" && echo "OK: $FUNCNAME"; }
+
+# Cross-engine: same kernel serves both back-to-back without OOM / stuck
+# resident state. Implicitly verifies the registry resolves both backends
+# with the same lifecycle contract.
+test_talkies_speech_kokoro_slugs_serve_back_to_back() {
+    local tmp first second
+    tmp=$(mktemp -d -t talkies_b2b.XXXXXX) || return 2
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+    first="${tmp}/a.wav"
+    second="${tmp}/b.wav"
+
+    talkies_method POST "/unload" >/dev/null 2>&1 || true
+    talkies_speech "$TTS_MODEL"        "af_heart" "Hello from pytorch." "wav" "$first"  || { echo "  FAIL: $TTS_MODEL synth"; return 1; }
+    talkies_speech "$TTS_MODEL_NVIDIA" "af_heart" "Hello from onnx."    "wav" "$second" || { echo "  FAIL: $TTS_MODEL_NVIDIA synth after eviction"; return 1; }
+
+    local a_size b_size
+    a_size=$(stat -c %s "$first"  2>/dev/null || stat -f %z "$first"  2>/dev/null || echo 0)
+    b_size=$(stat -c %s "$second" 2>/dev/null || stat -f %z "$second" 2>/dev/null || echo 0)
+    [ "$a_size" -ge 4096 ] && [ "$b_size" -ge 4096 ] \
+        || { echo "  FAIL: back-to-back wavs too small (a=$a_size b=$b_size)"; return 1; }
+    echo "  ok: pytorch -> onnx round-trip survived eviction (a=${a_size}B b=${b_size}B)"
+    echo "OK: $FUNCNAME"
+}
+
+test_talkies_speech_rejects_asr_model() {
+    local asr_model body code
+    asr_model=$(talkies_pick_fast_asr_model) || {
+        echo "  SKIP: no ASR on server"; return 0
+    }
+    body=$(jq -n --arg m "$asr_model" '{model:$m, input:"hi", response_format:"wav"}')
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+        -H "Content-Type: application/json" -d "$body" \
+        "${TALKIES_BASE_URL}/v1/audio/speech")
+    assert_eq "$code" "400" "ASR slug on /v1/audio/speech → 400" || return 1
+    echo "OK: $FUNCNAME"
+}
+
+test_talkies_transcribe_rejects_tts_model() {
+    local fixture
+    fixture=$(talkies_find_fixture)
+    [ -n "$fixture" ] || { echo "  SKIP: no fixture audio"; return 0; }
+    local code
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+        -F "model=$TTS_MODEL" \
+        -F "file=@${fixture}" \
+        "${TALKIES_BASE_URL}/v1/audio/transcriptions")
+    assert_eq "$code" "400" "TTS slug ($TTS_MODEL) on /v1/audio/transcriptions → 400" || return 1
+    echo "OK: $FUNCNAME"
+}
+
+harness_run_tests \
+    test_talkies_speech_voices_list \
+    test_talkies_speech_all_formats \
+    test_talkies_speech_default_voice \
+    test_talkies_speech_unknown_voice_400 \
+    test_talkies_speech_empty_input_400 \
+    test_talkies_speech_round_trip_through_asr \
+    test_talkies_speech_nvidia_voices_list \
+    test_talkies_speech_nvidia_all_formats \
+    test_talkies_speech_nvidia_default_voice \
+    test_talkies_speech_nvidia_unknown_voice_400 \
+    test_talkies_speech_nvidia_empty_input_400 \
+    test_talkies_speech_round_trip_through_asr_nvidia \
+    test_talkies_speech_kokoro_slugs_serve_back_to_back \
+    test_talkies_speech_rejects_asr_model \
     test_talkies_transcribe_rejects_tts_model
-    test_talkies_speech_round_trip_through_asr
-)

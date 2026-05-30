@@ -94,3 +94,4 @@ index-tts/
 # User-supplied test fixtures (audio dropped in by contributors per .gitkeep)
 tests/integration/.fixtures/*
 !tests/integration/.fixtures/.gitkeep
+/.e2e-cache

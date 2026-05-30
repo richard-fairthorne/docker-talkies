@@ -58,6 +58,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "onnxruntime==1.20.1" \
         "numpy==1.26.4" \
         "kokoro==0.9.4" \
+        "phonemizer-fork==3.3.2" \
     && uv pip install --python /opt/venv/bin/python --no-config \
         "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 

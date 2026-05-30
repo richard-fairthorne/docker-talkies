@@ -1,12 +1,26 @@
 #!/bin/bash
-# shellcheck shell=bash disable=SC2154  # ALL_TESTS comes from common.sh
-
 # Per-model transcription tests. Requires a fixture at
 # tests/integration/.fixtures/audio.<wav|mp3|m4a|flac|ogg> — anything else
 # skips with a clear message.
 #
+# Self-contained: spawns its own --rm --gpus all container via the harness,
+# tears it down on exit. Invoke directly: bash tests/integration/test_transcribe.sh
+#
 # CUDA-only by design: on a CPU host even one whisper-large-v3 inference
-# can take minutes. Don't run the suite against the CPU image.
+# can take minutes. Don't run against the CPU image.
+
+set -eo pipefail
+
+_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=harness.sh
+source "${_DIR}/harness.sh"
+# shellcheck source=common.sh
+source "${_DIR}/common.sh"
+
+# All ASR slugs in the registry — the suite exercises every one. Override via
+# TRANSCRIBE_MODELS if you want to scope to fewer (e.g. when iterating).
+TRANSCRIBE_MODELS="${TRANSCRIBE_MODELS:-whisper-large-v3,whisper-large-v3-turbo,parakeet-tdt-0.6b-v3,canary-180m-flash,canary-1b-flash,canary-qwen-2.5b}"
+harness_start "$TRANSCRIBE_MODELS"
 
 # ── plain json: every model returns non-empty text ───────────────────────────
 
@@ -34,7 +48,7 @@ test_talkies_transcribe_each_model_json() {
         echo "  ok: $mid text=\"$(echo "$text" | head -c 80)\""
     done
     if [ "$rc" -eq 0 ]; then
-        echo "OK: talkies_transcribe_each_model_json"
+        echo "OK: $FUNCNAME"
     fi
     return $rc
 }
@@ -79,7 +93,7 @@ test_talkies_transcribe_each_model_verbose_json() {
         echo "  ok: $mid segments=$segs words=$words"
     done
     if [ "$rc" -eq 0 ]; then
-        echo "OK: talkies_transcribe_each_model_verbose_json"
+        echo "OK: $FUNCNAME"
     fi
     return $rc
 }
@@ -109,7 +123,7 @@ test_talkies_transcribe_each_model_srt() {
         echo "  ok: $mid srt"
     done
     if [ "$rc" -eq 0 ]; then
-        echo "OK: talkies_transcribe_each_model_srt"
+        echo "OK: $FUNCNAME"
     fi
     return $rc
 }
@@ -140,7 +154,7 @@ test_talkies_transcribe_each_model_vtt() {
         echo "  ok: $mid vtt"
     done
     if [ "$rc" -eq 0 ]; then
-        echo "OK: talkies_transcribe_each_model_vtt"
+        echo "OK: $FUNCNAME"
     fi
     return $rc
 }
@@ -154,7 +168,6 @@ test_talkies_api_ps_reflects_loaded_model() {
         echo "  SKIP: tests/integration/.fixtures/audio.* missing"
         return 0
     fi
-    # Fresh slate.
     talkies_method POST "/unload" >/dev/null 2>&1 || true
 
     talkies_transcribe "$mid" "$fixture" "json" >/dev/null || {
@@ -165,7 +178,7 @@ test_talkies_api_ps_reflects_loaded_model() {
     local ps
     ps=$(talkies_get "/api/ps") || { echo "  FAIL: /api/ps after load"; return 1; }
     assert_contains "$ps" "$mid" "/api/ps lists loaded $mid" || return 1
-    echo "OK: talkies_api_ps_reflects_loaded_model"
+    echo "OK: $FUNCNAME"
 }
 
 # ── DELETE /api/ps/{slug} unloads a previously-loaded model ──────────────────
@@ -192,14 +205,13 @@ test_talkies_api_ps_delete_unloads() {
         echo "  FAIL: $mid still listed in /api/ps after unload"
         return 1
     fi
-    echo "OK: talkies_api_ps_delete_unloads"
+    echo "OK: $FUNCNAME"
 }
 
-ALL_TESTS+=(
-    test_talkies_transcribe_each_model_json
-    test_talkies_transcribe_each_model_verbose_json
-    test_talkies_transcribe_each_model_srt
-    test_talkies_transcribe_each_model_vtt
-    test_talkies_api_ps_reflects_loaded_model
+harness_run_tests \
+    test_talkies_transcribe_each_model_json \
+    test_talkies_transcribe_each_model_verbose_json \
+    test_talkies_transcribe_each_model_srt \
+    test_talkies_transcribe_each_model_vtt \
+    test_talkies_api_ps_reflects_loaded_model \
     test_talkies_api_ps_delete_unloads
-)

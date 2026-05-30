@@ -1,44 +1,30 @@
 #!/bin/bash
-# Talkies integration test driver — CUDA only.
+# Talkies integration test dispatcher.
 #
-# Builds the CUDA image, starts a fresh container with --gpus all, waits for
-# /healthz, runs every test_*.sh file in this directory, prints a summary,
-# and tears the container down.
+# Each test_*.sh / e2e_*.sh in this directory is fully self-contained: it
+# spawns its own --rm --gpus all CUDA container via harness.sh, runs its
+# checks, tears the container down on exit. This script just runs all of
+# them as subprocesses and summarises pass/fail.
 #
-# Why CUDA-only: the alternative (CPU image + faster-whisper-large on a
-# desktop CPU) takes >30 min per transcription, which is useless for a
-# regression suite. Whisper-turbo on a GPU is sub-second.
+# Per-file invocation works too — no shared orchestration required:
+#
+#     bash tests/integration/test_endpoints.sh
+#     bash tests/integration/test_speech.sh
+#     bash tests/integration/e2e_kokoro_nvidia.sh
 #
 # Env knobs:
-#   TALKIES_TEST_PORT       host port to publish (default 18000)
-#   TALKIES_TEST_CACHE      host dir for /data (models + voices + files; default ~/.talkies-data)
-#   TALKIES_TEST_IMAGE      image to use (default psyb0t/talkies:local-cuda)
-#   TALKIES_TEST_KEEP=1     don't `docker rm` the container at exit (debug)
-#   TALKIES_SKIP_BUILD=1    skip `make build-cuda` — use whatever's tagged
-#   TALKIES_ENABLED_MODELS  comma slugs to download; empty = all 7 (default)
-#   TALKIES_TEST_CPU_PCT    cap container CPU at this % of host cores (default 70).
-#                           Stops the test from wedging the host under build / heavy
-#                           inference. Set to 0/empty to disable the cap.
-#   TALKIES_TEST_MEM        memory cap passed to `docker run --memory` (default 32g).
-#                           Combined with --memory-swap=$mem the kernel can't dump
-#                           process pages into host swap when buffer cache gets fat.
+#   TALKIES_SKIP_BUILD=1  skip `make build-cuda` — use whatever's tagged
+#   HARNESS_IMAGE         override the docker image tag the tests use
+#   HARNESS_CACHE_DIR     override the on-host /data cache dir
+#   TALKIES_TEST_FILTER   only run files matching this glob (default *.sh)
+#
+# CLI args (optional): list of test file basenames to run. Empty = all.
+#
+#     bash tests/integration/run.sh test_speech.sh e2e_kokoro_nvidia.sh
 
 set -eo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-
-TALKIES_TEST_PORT="${TALKIES_TEST_PORT:-18000}"
-TALKIES_TEST_CACHE="${TALKIES_TEST_CACHE:-$HOME/.talkies-data}"
-TALKIES_TEST_IMAGE="${TALKIES_TEST_IMAGE:-psyb0t/talkies:local-cuda}"
-CONTAINER_NAME="talkies-integration-test-$$"
-
-export TALKIES_TEST_PORT
-export TALKIES_BASE_URL="http://127.0.0.1:${TALKIES_TEST_PORT}"
-
-# Caller may set TALKIES_ENABLED_MODELS to scope what gets downloaded.
-# Empty means "every model in models.json" — fine when the cache is warm.
-TALKIES_ENABLED_MODELS="${TALKIES_ENABLED_MODELS:-}"
-export TALKIES_ENABLED_MODELS
 
 # ── pre-flight ───────────────────────────────────────────────────────────────
 
@@ -46,128 +32,75 @@ command -v docker >/dev/null 2>&1 || { echo "FATAL: docker not on PATH" >&2; exi
 command -v curl   >/dev/null 2>&1 || { echo "FATAL: curl not on PATH"   >&2; exit 2; }
 command -v jq     >/dev/null 2>&1 || { echo "FATAL: jq not on PATH"     >&2; exit 2; }
 
-if ! docker info 2>/dev/null | grep -qi nvidia; then
-    echo "FATAL: docker daemon doesn't report an NVIDIA runtime — this suite needs --gpus all." >&2
-    echo "       Install nvidia-container-toolkit and restart dockerd." >&2
+if ! docker info 2>/dev/null | grep -qiE "nvidia|cdi:"; then
+    echo "FATAL: docker daemon has no NVIDIA runtime — needs --gpus all" >&2
     exit 2
 fi
-
-mkdir -p "$TALKIES_TEST_CACHE"
 
 # ── build (unless skipped) ───────────────────────────────────────────────────
 
 if [ "${TALKIES_SKIP_BUILD:-0}" != "1" ]; then
-    echo "[run] building CUDA image ($TALKIES_TEST_IMAGE)..."
+    echo "[run] building CUDA image..."
     make build-cuda >/dev/null
 fi
 
-# ── start container ──────────────────────────────────────────────────────────
+# ── collect test files ───────────────────────────────────────────────────────
 
-cleanup() {
-    if [ "${TALKIES_TEST_KEEP:-0}" = "1" ]; then
-        echo "[run] TALKIES_TEST_KEEP=1 — leaving container $CONTAINER_NAME running"
-        echo "      tail logs: docker logs -f $CONTAINER_NAME"
-        echo "      remove:    docker rm -f $CONTAINER_NAME"
-        return
-    fi
-    echo "[run] stopping $CONTAINER_NAME"
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-# Compute CPU cap. Default 70% of host cores — leaves headroom so the desktop
-# stays responsive while the container is grinding through whisper/parakeet
-# inference and Kokoro synth. Anything < 1 falls back to "no cap".
-TALKIES_TEST_CPU_PCT="${TALKIES_TEST_CPU_PCT:-70}"
-HOST_CPUS=$(nproc)
-CPU_LIMIT_ARGS=()
-if [ "${TALKIES_TEST_CPU_PCT:-0}" -gt 0 ] 2>/dev/null; then
-    # bc keeps fractional precision (e.g. 16 * 70 / 100 = 11.2)
-    CPU_CAP=$(awk -v c="$HOST_CPUS" -v p="$TALKIES_TEST_CPU_PCT" 'BEGIN{printf "%.2f", c*p/100}')
-    CPU_LIMIT_ARGS=(--cpus "$CPU_CAP")
-    echo "[run] cpu cap: ${TALKIES_TEST_CPU_PCT}% of ${HOST_CPUS} cores → --cpus $CPU_CAP"
-fi
-
-# Memory cap. --memory + --memory-swap=$mem disables in-container swap, which
-# stops the kernel from spilling test container pages into the host's swap file
-# — that's what was eating the desktop's responsiveness.
-TALKIES_TEST_MEM="${TALKIES_TEST_MEM:-32g}"
-MEM_LIMIT_ARGS=()
-if [ -n "$TALKIES_TEST_MEM" ]; then
-    MEM_LIMIT_ARGS=(--memory "$TALKIES_TEST_MEM" --memory-swap "$TALKIES_TEST_MEM")
-    echo "[run] mem cap: --memory $TALKIES_TEST_MEM (swap disabled in container)"
-fi
-
-echo "[run] launching $CONTAINER_NAME (port=$TALKIES_TEST_PORT cache=$TALKIES_TEST_CACHE)"
-docker run -d --rm --gpus all \
-    "${CPU_LIMIT_ARGS[@]}" \
-    "${MEM_LIMIT_ARGS[@]}" \
-    --name "$CONTAINER_NAME" \
-    -v "$TALKIES_TEST_CACHE:/data" \
-    -e TALKIES_DEVICE=cuda \
-    -e TALKIES_ENABLED_MODELS="$TALKIES_ENABLED_MODELS" \
-    -p "${TALKIES_TEST_PORT}:8000" \
-    "$TALKIES_TEST_IMAGE" >/dev/null
-
-# ── wait for ready ───────────────────────────────────────────────────────────
-
-# shellcheck disable=SC1091
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-
-echo "[run] waiting for talkies /healthz (first boot may download all weights)..."
-if ! talkies_wait_ready "${TALKIES_READY_TIMEOUT:-1800}"; then
-    echo "[run] talkies never came up — last 80 log lines:"
-    docker logs --tail 80 "$CONTAINER_NAME" || true
-    exit 1
-fi
-echo "[run] talkies is ready"
-
-# ── load test files ──────────────────────────────────────────────────────────
+_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 shopt -s nullglob
-TEST_FILES=("$(dirname "${BASH_SOURCE[0]}")"/test_*.sh)
+declare -a TEST_FILES
+for f in "$_DIR"/test_*.sh "$_DIR"/e2e_*.sh; do
+    TEST_FILES+=("$(basename "$f")")
+done
 shopt -u nullglob
 
-for f in "${TEST_FILES[@]}"; do
-    # shellcheck disable=SC1090
-    source "$f"
-done
-
-# ── run + summarize ──────────────────────────────────────────────────────────
-
-if [ "${#ALL_TESTS[@]}" -eq 0 ]; then
-    echo "[run] no tests registered — nothing to do" >&2
-    exit 1
-fi
-
-# Allow CLI selection: `run.sh test_talkies_healthz test_talkies_models_list`
+# Allow CLI selection by basename: `run.sh test_speech.sh e2e_kokoro_nvidia.sh`
 if [ "$#" -gt 0 ]; then
     SELECTED=("$@")
 else
-    SELECTED=("${ALL_TESTS[@]}")
+    SELECTED=("${TEST_FILES[@]}")
 fi
+
+if [ "${#SELECTED[@]}" -eq 0 ]; then
+    echo "[run] no test files found in $_DIR" >&2
+    exit 1
+fi
+
+# ── run each as its own subprocess (own container, own port, --rm) ───────────
 
 PASS=0
 FAIL=0
-FAILED_TESTS=()
-for t in "${SELECTED[@]}"; do
+FAILED=()
+
+for tf in "${SELECTED[@]}"; do
+    full="${_DIR}/${tf}"
+    if [ ! -f "$full" ]; then
+        echo ""
+        echo "[run] SKIP: $tf — file not found"
+        continue
+    fi
     echo ""
-    echo "──[ $t ]──"
-    if "$t"; then
+    echo "============================================================="
+    echo "  RUN  $tf"
+    echo "============================================================="
+    if bash "$full"; then
         PASS=$((PASS + 1))
     else
         FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$t")
+        FAILED+=("$tf")
     fi
 done
 
+# ── summary ──────────────────────────────────────────────────────────────────
+
 echo ""
 echo "═══════════════════════════════════════════════════════════"
-echo "  pass=$PASS fail=$FAIL total=$((PASS + FAIL))"
+echo "  integration suite: pass=$PASS fail=$FAIL total=$((PASS + FAIL))"
 if [ "$FAIL" -ne 0 ]; then
-    echo "  failed:"
-    for t in "${FAILED_TESTS[@]}"; do
-        echo "    - $t"
+    echo "  failed files:"
+    for tf in "${FAILED[@]}"; do
+        echo "    - $tf"
     done
 fi
 echo "═══════════════════════════════════════════════════════════"
