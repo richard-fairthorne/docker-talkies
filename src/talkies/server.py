@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote
@@ -30,6 +31,7 @@ import mimetypes
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -404,6 +406,33 @@ async def speech(body: SpeechRequest) -> Response:
         )
         await asyncio.gather(
             *(b.unload() for _, b in siblings), return_exceptions=True
+        )
+
+    # PCM streaming path — only when the backend natively supports it
+    # (currently Qwen3-TTS only). Yields int16 LE PCM chunks as they are
+    # decoded; no container header. The X-Sample-Rate header signals the
+    # waveform parameters to the client.
+    if fmt == "pcm" and hasattr(backend, "synthesize_stream"):
+        chunk_size = config.QWEN3_STREAM_CHUNK_SIZE
+
+        async def _pcm_stream() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in backend.synthesize_stream(  # type: ignore[union-attr]
+                    body.input,
+                    voice=voice,
+                    speed=speed,
+                    instructions=body.instructions,
+                    chunk_size=chunk_size,
+                ):
+                    yield chunk
+            except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                # Headers are already committed; log and stop the stream.
+                log.error("qwen3_tts streaming error (stream aborted): %s", exc)
+
+        return StreamingResponse(
+            _pcm_stream(),
+            media_type="application/octet-stream",
+            headers={"X-Sample-Rate": str(backend.sample_rate)},  # type: ignore[union-attr]
         )
 
     try:

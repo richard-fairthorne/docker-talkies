@@ -34,7 +34,9 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import threading
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -209,6 +211,13 @@ class Qwen3TTSBackend:
             max_seq_len=2048,
         )
 
+    @property
+    def sample_rate(self) -> int:
+        """Output sample rate in Hz. 24000 is the Qwen3-TTS fixed rate."""
+        if self._model is not None:
+            return int(getattr(self._model, "sample_rate", 24000))
+        return 24000
+
     async def synthesize(
         self,
         text: str,
@@ -241,6 +250,115 @@ class Qwen3TTSBackend:
             )
             self._last_used = time.monotonic()
             return result
+
+    async def synthesize_stream(
+        self,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+        instructions: str | None = None,
+        chunk_size: int = 8,
+    ) -> AsyncIterator[bytes]:
+        """Async generator that yields int16 PCM bytes chunks as they are decoded.
+
+        Each yielded ``bytes`` object contains one decoded audio chunk — raw
+        signed 16-bit little-endian mono samples at ``self.sample_rate`` Hz.
+        No WAV/container header is prepended; the caller streams them directly.
+
+        Cancellation: when the caller stops iterating (client disconnect or
+        ``aclose()``), the ``finally`` block signals the worker thread via a
+        ``threading.Event`` and drains the queue so the thread can unblock and
+        exit cleanly.
+        """
+        # --- pre-yield validation (errors here become proper HTTP 4xx) ---
+        if not text.strip():
+            raise ValueError("input text is empty")
+        catalog = self._scan_voices()
+        wav_path = catalog.get(voice)
+        if wav_path is None:
+            raise ValueError(
+                f"unknown voice {voice!r} for model {self.model_id!r}; "
+                f"{len(catalog)} voice(s) available — call "
+                "GET /v1/audio/voices to list them"
+            )
+        cfg = self._voice_config(wav_path)
+        ref_text = cfg["ref_text"]
+        x_vector_only = not ref_text
+        if x_vector_only:
+            self._log.warning(
+                "no reference transcript (.txt) found for voice %s — "
+                "falling back to x-vector-only mode (lower fidelity). "
+                "Add a sibling .txt file with the spoken content of the "
+                "reference audio to enable ICL cloning.",
+                cfg["ref_audio"],
+            )
+        if speed != 1.0:
+            self._log.debug(
+                "qwen3_tts has no speed control — ignoring speed=%.2f", speed
+            )
+
+        model = await self.get_model()
+
+        loop = asyncio.get_running_loop()
+        # maxsize=4 — bounded for backpressure: if the HTTP client drains
+        # slowly the GPU generation pauses rather than running ahead unbounded.
+        queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=4)
+        cancel = threading.Event()
+
+        def _stream_worker() -> None:
+            import numpy as np
+
+            try:
+                for audio_chunk, _sr, _timing in model.generate_voice_clone_streaming(
+                    text=text,
+                    language=cfg["language"],
+                    ref_audio=cfg["ref_audio"],
+                    ref_text=ref_text,
+                    xvec_only=x_vector_only,
+                    instruct=instructions or None,
+                    chunk_size=chunk_size,
+                ):
+                    if cancel.is_set():
+                        break
+                    chunk = audio_chunk.astype(np.float32, copy=False)
+                    np.clip(chunk, -1.0, 1.0, out=chunk)
+                    pcm = (chunk * 32767.0).astype(np.int16).tobytes()
+                    # Blocks until the event loop drains a slot — provides
+                    # back-pressure and respects cancel drain in finally.
+                    fut = asyncio.run_coroutine_threadsafe(queue.put(pcm), loop)
+                    fut.result()  # raises if loop closed
+                    if cancel.is_set():
+                        break
+            except Exception as exc:  # noqa: BLE001
+                if not cancel.is_set():
+                    asyncio.run_coroutine_threadsafe(queue.put(exc), loop)
+                    return
+            finally:
+                # Always send sentinel so the async side can exit.
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+        async with self._lock:
+            thread_task = asyncio.create_task(asyncio.to_thread(_stream_worker))
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    yield item  # type: ignore[misc]
+            finally:
+                # Signal the thread then drain so any blocked queue.put()
+                # future.result() can complete and the thread can exit.
+                cancel.set()
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                await thread_task
+                self._last_used = time.monotonic()
 
     def _synthesize_sync(
         self, model: Any, text: str, cfg: dict[str, Any], instructions: str | None

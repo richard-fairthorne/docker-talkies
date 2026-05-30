@@ -144,6 +144,11 @@ VAD_MIN_SILENCE_MS: int = _int_env("TALKIES_VAD_MIN_SILENCE_MS", 500)
 VAD_SPEECH_PAD_MS: int = _int_env("TALKIES_VAD_SPEECH_PAD_MS", 200)
 VAD_THRESHOLD: float = _float_env("TALKIES_VAD_THRESHOLD", 0.5)
 
+# Qwen3-TTS streaming — number of codec steps to decode per yielded chunk.
+# 12 steps ≈ 1 s of audio; 8 steps ≈ 667 ms (good balance of TTFA vs overhead).
+# Only relevant when response_format="pcm" with a qwen3_tts backend.
+QWEN3_STREAM_CHUNK_SIZE: int = _int_env("TALKIES_QWEN3_STREAM_CHUNK_SIZE", 8)
+
 
 def load_registry() -> dict[str, dict]:
     """Read models.json and return {model_id: {repo, executor, language?, ...}}."""
