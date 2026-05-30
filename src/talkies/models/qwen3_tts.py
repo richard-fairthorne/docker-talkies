@@ -11,8 +11,8 @@ Voices are sourced from two on-disk dirs and merged into a single catalog:
   ``foo/bar/me`` shows up in ``GET /v1/audio/voices``.
 
 Each ``<name>.wav`` may have sibling ``<name>.txt`` (reference transcript
-for ICL voice cloning — the model accepts an empty string but the clone
-fidelity is noticeably better with a faithful transcript) and
+for ICL voice cloning — required by the model; without it the backend
+falls back to x-vector-only mode which is lower fidelity) and
 ``<name>.lang`` (language label string passed through to the model —
 defaults to "English").
 
@@ -215,6 +215,7 @@ class Qwen3TTSBackend:
         *,
         voice: str,
         speed: float,
+        instructions: str | None = None,
     ) -> SynthesisResult:
         if not text.strip():
             raise ValueError("input text is empty")
@@ -236,21 +237,33 @@ class Qwen3TTSBackend:
         model = await self.get_model()
         async with self._lock:
             result = await asyncio.to_thread(
-                self._synthesize_sync, model, text, cfg
+                self._synthesize_sync, model, text, cfg, instructions
             )
             self._last_used = time.monotonic()
             return result
 
     def _synthesize_sync(
-        self, model: Any, text: str, cfg: dict[str, Any]
+        self, model: Any, text: str, cfg: dict[str, Any], instructions: str | None
     ) -> SynthesisResult:
         import numpy as np
 
+        ref_text = cfg["ref_text"]
+        x_vector_only = not ref_text
+        if x_vector_only:
+            self._log.warning(
+                "no reference transcript (.txt) found for voice %s — "
+                "falling back to x-vector-only mode (lower fidelity). "
+                "Add a sibling .txt file with the spoken content of the "
+                "reference audio to enable ICL cloning.",
+                cfg["ref_audio"],
+            )
         audio_arrays, sample_rate = model.generate_voice_clone(
             text=text,
             language=cfg["language"],
             ref_audio=cfg["ref_audio"],
-            ref_text=cfg["ref_text"],
+            ref_text=ref_text,
+            x_vector_only_mode=x_vector_only,
+            instruct=instructions or None,
         )
         if not audio_arrays:
             return SynthesisResult(pcm_int16=b"", sample_rate=int(sample_rate))

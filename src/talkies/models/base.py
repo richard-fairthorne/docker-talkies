@@ -102,6 +102,7 @@ class TTSBackend(BackendBase, Protocol):
         *,
         voice: str,
         speed: float,
+        instructions: str | None = None,
     ) -> SynthesisResult: ...
 
 
