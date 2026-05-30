@@ -329,9 +329,11 @@ async def load_audio_from_path(file_path: str) -> tuple[bytes, str]:
 class SpeechRequest(BaseModel):
     """OpenAI-compatible POST body for ``/v1/audio/speech``.
 
-    ``instructions`` is accepted for wire compatibility but currently
-    ignored — Kokoro doesn't take instruction prompts. ``speed`` clamped
-    to 0.25-4.0 (matches OpenAI's documented range).
+    ``instructions`` controls speech style for backends that support it
+    (Qwen3-TTS: passed as the ``instruct`` parameter to ``generate_voice_clone``;
+    works best in ICL mode i.e. when a ``.txt`` transcript exists for the voice).
+    Ignored by Kokoro, which has no instruction-prompt input.
+    ``speed`` clamped to 0.25-4.0 (matches OpenAI's documented range).
     """
 
     model: str
@@ -344,9 +346,6 @@ class SpeechRequest(BaseModel):
 
 @app.post("/v1/audio/speech")
 async def speech(body: SpeechRequest) -> Response:
-    # body.instructions is accepted for OpenAI parity but currently ignored —
-    # Kokoro has no instruction-prompt input.
-
     model = body.model
     if model not in BACKENDS:
         raise HTTPException(
@@ -408,7 +407,9 @@ async def speech(body: SpeechRequest) -> Response:
         )
 
     try:
-        synth = await backend.synthesize(body.input, voice=voice, speed=speed)
+        synth = await backend.synthesize(
+            body.input, voice=voice, speed=speed, instructions=body.instructions
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:

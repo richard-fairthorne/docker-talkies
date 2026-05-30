@@ -166,6 +166,7 @@ class KokoroBackend:
         *,
         voice: str,
         speed: float,
+        instructions: str | None = None,
     ) -> SynthesisResult:
         if not text.strip():
             raise ValueError("input text is empty")
