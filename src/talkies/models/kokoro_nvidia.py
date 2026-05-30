@@ -177,7 +177,12 @@ class KokoroNvidiaBackend:
         *,
         voice: str,
         speed: float,
+        instructions: str | None = None,
     ) -> SynthesisResult:
+        # Kokoro takes no instruction-prompt input — accepted for protocol
+        # parity with the TTSBackend interface and silently ignored, same
+        # convention as the kokoro-82m (PyTorch) backend.
+        del instructions
         if not text.strip():
             raise ValueError("input text is empty")
         if voice not in self.voices():
