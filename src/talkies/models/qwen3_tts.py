@@ -262,7 +262,7 @@ class Qwen3TTSBackend:
             language=cfg["language"],
             ref_audio=cfg["ref_audio"],
             ref_text=ref_text,
-            x_vector_only_mode=x_vector_only,
+            xvec_only=x_vector_only,
             instruct=instructions or None,
         )
         if not audio_arrays:
