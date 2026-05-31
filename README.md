@@ -821,6 +821,14 @@ make run             # build + run CPU image, /data persisted at ~/.talkies-data
 make run-cuda        # build + run CUDA image with --gpus all
 
 make test-integration  # CUDA integration suite — builds + boots talkies, hits the HTTP surface
+
+# Dependency management (bumps [tool.uv] exclude-newer to today first, then
+# runs the uv operation inside the dev container — see "Security notes" below)
+make pkg-lock                 # refresh uv.lock honouring the current gate
+make pkg-add PKG=name[==ver]  # add a package
+make pkg-update PKG=name      # upgrade ONE package to its latest allowed version
+make pkg-upgrade              # upgrade EVERYTHING to its latest allowed version
+make pkg-remove PKG=name      # remove a package
 ```
 
 The dev image is intentionally light — it has the lightweight runtime deps (`fastapi`, `pydantic`, etc.) plus lint/format/test tools, but no torch, no nemo_toolkit, no faster-whisper. Those are multi-GB and CPU/CUDA-variant-specific; pulling them just to lint would be silly. The full ML stack lives only in the production images.
@@ -859,7 +867,7 @@ CPU isn't supported as a test target on purpose — whisper-large-v3 on a deskto
 - Every Python dependency is exactly pinned in the Dockerfiles. No floating constraints.
 - Base images pinned by `@sha256:...` digest (Python 3.12-slim-bookworm for CPU, nvidia/cuda:12.6.3-runtime-ubuntu24.04 for CUDA).
 - `uv` itself is COPY'd from `ghcr.io/astral-sh/uv:0.11.15` by digest.
-- `[tool.uv] exclude-newer` in `pyproject.toml` refuses to install package versions newer than the gate date — blocks same-day supply-chain attacks at lockfile generation time.
+- `[tool.uv] exclude-newer` in `pyproject.toml` refuses to install package versions newer than the gate date — blocks same-day supply-chain attacks at lockfile generation time. Every `make pkg-*` dep mutation (`pkg-add`, `pkg-update`, `pkg-upgrade`, `pkg-remove`) bumps the gate to today's UTC midnight FIRST via `scripts/bump_exclude_newer.sh`, so the age window stays anchored to the moment of the change instead of silently drifting.
 - Container runs as non-root user `talkies` (uid 1000). `/data` is the only writable mount target.
 - `HF_HUB_OFFLINE=1` is the production default — once weights are cached on disk, the container has no reason to call out to HuggingFace. The entrypoint's prefetch step transparently unsets this for the snapshot-download sub-shell only; the server process itself runs offline. So in steady state (after the first boot) talkies never reaches the internet.
 - Optional built-in bearer-token auth via `TALKIES_AUTH_TOKEN` (see [Bearer-token auth](#bearer-token-auth)). Default-off — set the env var to require `Authorization: Bearer <token>` on every route (HTTP API and MCP). The server binds to `0.0.0.0:8000` inside the container — control network exposure at `docker run` time (`-p 127.0.0.1:8000:8000` for loopback-only on the host, `-p 8000:8000` for all interfaces). For untrusted networks, combine the token with a reverse proxy doing TLS termination + rate limiting.

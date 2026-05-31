@@ -95,3 +95,4 @@ index-tts/
 tests/integration/.fixtures/*
 !tests/integration/.fixtures/.gitkeep
 /.e2e-cache
+.claude

@@ -4,6 +4,9 @@ DEV_IMAGE := psyb0t/talkies-dev:latest
 CPU_IMAGE := psyb0t/talkies:local
 CUDA_IMAGE := psyb0t/talkies:local-cuda
 
+PYPROJECT := pyproject.toml
+BUMP_HOST := bash scripts/bump_exclude_newer.sh $(PYPROJECT)
+
 UID := $(shell id -u)
 GID := $(shell id -g)
 
@@ -30,7 +33,8 @@ DEV_RUN_TTY := docker run --rm -it \
         build build-cuda build-all \
         run run-cuda \
         test test-unit test-integration \
-        lint format check clean
+        lint format check clean \
+        pkg-lock pkg-upgrade pkg-add pkg-remove pkg-update
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -44,6 +48,34 @@ dev-image: ## Build/refresh the sandboxed dev image
 
 shell: dev-image ## Drop into a shell inside the dev container
 	$(DEV_RUN_TTY) bash
+
+# -----------------------------------------------------------------------------
+# Package management — uv inside the dev container.
+# Every mutation bumps [tool.uv] exclude-newer to today first so the
+# supply-chain age gate is always anchored to the moment of the change.
+# -----------------------------------------------------------------------------
+
+pkg-lock: dev-image ## Refresh uv.lock (honors current exclude-newer)
+	$(DEV_RUN) uv lock
+
+pkg-upgrade: dev-image ## Bump exclude-newer + refresh lock with newest pins
+	$(BUMP_HOST)
+	$(DEV_RUN) uv lock --upgrade
+
+pkg-add: dev-image ## Add a package (usage: make pkg-add PKG=name[==ver])
+	@test -n "$(PKG)" || (echo "usage: make pkg-add PKG=name[==ver]" >&2; exit 1)
+	$(BUMP_HOST)
+	$(DEV_RUN) uv add --no-sync $(PKG)
+
+pkg-remove: dev-image ## Remove a package (usage: make pkg-remove PKG=name)
+	@test -n "$(PKG)" || (echo "usage: make pkg-remove PKG=name" >&2; exit 1)
+	$(BUMP_HOST)
+	$(DEV_RUN) uv remove --no-sync $(PKG)
+
+pkg-update: dev-image ## Upgrade ONE package (usage: make pkg-update PKG=name)
+	@test -n "$(PKG)" || (echo "usage: make pkg-update PKG=name" >&2; exit 1)
+	$(BUMP_HOST)
+	$(DEV_RUN) uv lock --upgrade-package $(PKG)
 
 # -----------------------------------------------------------------------------
 # Production image builds.

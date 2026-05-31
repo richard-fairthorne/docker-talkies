@@ -41,4 +41,6 @@ build-backend = "hatchling.build"
 packages = ["src/talkies"]
 
 [tool.uv]
+# Supply-chain defense: only install pkg versions older than `exclude-newer`.
+# Bumped by `make pkg-*` targets before any dep mutation. UTC midnight.
 exclude-newer = "2026-05-28T00:00:00Z"
