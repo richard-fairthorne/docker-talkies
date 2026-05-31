@@ -54,6 +54,7 @@
     "qwen3-tts-0.6b": {
       "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
       "executor": "qwen3_tts",
+      "qwen3_mode": "base",
       "modality": "tts",
       "default_voice": "alloy",
       "default_language": "English",
@@ -75,6 +76,68 @@
         "Turkish",
         "Polish",
         "Dutch"
+      ]
+    },
+    "qwen3-tts-1.7b": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "executor": "qwen3_tts",
+      "qwen3_mode": "base",
+      "modality": "tts",
+      "default_voice": "alloy",
+      "default_language": "English",
+      "languages": [
+        "English",
+        "Chinese",
+        "Japanese",
+        "Korean",
+        "French",
+        "German",
+        "Spanish",
+        "Italian",
+        "Portuguese",
+        "Russian"
+      ]
+    },
+    "qwen3-tts-0.6b-custom": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "executor": "qwen3_tts",
+      "qwen3_mode": "custom_voice",
+      "modality": "tts",
+      "default_voice": "Vivian",
+      "default_language": "English",
+      "languages": [
+        "English",
+        "Chinese",
+        "Japanese",
+        "Korean"
+      ]
+    },
+    "qwen3-tts-1.7b-custom": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "executor": "qwen3_tts",
+      "qwen3_mode": "custom_voice",
+      "modality": "tts",
+      "default_voice": "Vivian",
+      "default_language": "English",
+      "languages": [
+        "English",
+        "Chinese",
+        "Japanese",
+        "Korean"
+      ]
+    },
+    "qwen3-tts-1.7b-design": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "executor": "qwen3_tts",
+      "qwen3_mode": "voice_design",
+      "modality": "tts",
+      "default_voice": "design",
+      "default_language": "English",
+      "languages": [
+        "English",
+        "Chinese",
+        "Japanese",
+        "Korean"
       ]
     }
   }

@@ -41,6 +41,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY requirements-heavy-cpu.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python \
+        --no-config \
         --require-hashes \
         --no-deps \
         --extra-index-url https://download.pytorch.org/whl/cpu \

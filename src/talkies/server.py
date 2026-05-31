@@ -344,6 +344,25 @@ class SpeechRequest(BaseModel):
     response_format: str | None = None
     speed: float | None = Field(default=None, ge=0.25, le=4.0)
     instructions: str | None = None
+    # Non-OpenAI extra params — OpenAI SDKs send via extra_body={...}; cURL just
+    # adds JSON keys. All are silently ignored by backends that don't use them
+    # (Kokoro). Qwen3-TTS reads them across all three modes.
+    #
+    # `language`           — spoken language (Qwen3 custom_voice / voice_design;
+    #                        base mode reads voice's sibling .lang file first).
+    # `temperature`        — sampler temperature (Qwen3 only; default 0.9).
+    # `top_k`              — top-k truncation (Qwen3 only; default 50).
+    # `top_p`              — nucleus sampling (Qwen3 only; default 1.0).
+    # `repetition_penalty` — penalize codec-token repeats (Qwen3 only; default 1.05).
+    # `max_new_tokens`     — codec-step cap (Qwen3 only; default 2048 = model max).
+    # `do_sample`          — false = greedy decode (Qwen3 only; default true).
+    language: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_k: int | None = Field(default=None, ge=1, le=1000)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    repetition_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
+    max_new_tokens: int | None = Field(default=None, ge=1, le=2048)
+    do_sample: bool | None = None
 
 
 @app.post("/v1/audio/speech")
@@ -412,6 +431,22 @@ async def speech(body: SpeechRequest) -> Response:
     # (currently Qwen3-TTS only). Yields int16 LE PCM chunks as they are
     # decoded; no container header. The X-Sample-Rate header signals the
     # waveform parameters to the client.
+    # Non-OpenAI sampling knobs (Qwen3-TTS only — Kokoro silently drops).
+    # Pack into a single dict so the backend signature stays clean as we
+    # add or remove knobs over time.
+    sampling: dict[str, Any] = {
+        k: v
+        for k, v in {
+            "temperature": body.temperature,
+            "top_k": body.top_k,
+            "top_p": body.top_p,
+            "repetition_penalty": body.repetition_penalty,
+            "max_new_tokens": body.max_new_tokens,
+            "do_sample": body.do_sample,
+        }.items()
+        if v is not None
+    }
+
     if fmt == "pcm" and hasattr(backend, "synthesize_stream"):
         chunk_size = config.QWEN3_STREAM_CHUNK_SIZE
 
@@ -422,6 +457,8 @@ async def speech(body: SpeechRequest) -> Response:
                     voice=voice,
                     speed=speed,
                     instructions=body.instructions,
+                    language=body.language,
+                    sampling=sampling,
                     chunk_size=chunk_size,
                 ):
                     yield chunk
@@ -437,7 +474,12 @@ async def speech(body: SpeechRequest) -> Response:
 
     try:
         synth = await backend.synthesize(
-            body.input, voice=voice, speed=speed, instructions=body.instructions
+            body.input,
+            voice=voice,
+            speed=speed,
+            instructions=body.instructions,
+            language=body.language,
+            sampling=sampling,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

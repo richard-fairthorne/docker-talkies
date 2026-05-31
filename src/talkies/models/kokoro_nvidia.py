@@ -178,6 +178,8 @@ class KokoroNvidiaBackend:
         voice: str,
         speed: float,
         instructions: str | None = None,
+        language: str | None = None,
+        sampling: dict | None = None,
     ) -> SynthesisResult:
         # Kokoro takes no instruction-prompt input — accepted for protocol
         # parity with the TTSBackend interface and silently ignored, same

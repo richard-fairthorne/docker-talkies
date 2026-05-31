@@ -61,11 +61,15 @@ def build_backends(registry: dict[str, dict], device: str) -> dict[str, Any]:
             )
             continue
         if executor == "qwen3_tts":
+            qwen3_mode = entry.get("qwen3_mode", "base")
+            default_language = entry.get("default_language", "English")
             out[model_id] = Qwen3TTSBackend(
                 model_id=model_id,
                 repo=repo,
                 model_path=model_path,
                 device=device,
+                mode=qwen3_mode,
+                default_language=default_language,
             )
             continue
         out[model_id] = MultitaskBackend(

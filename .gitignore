@@ -91,8 +91,14 @@ index-tts/
 # Integration test cache (HF snapshots downloaded by the runner)
 .talkies-test-cache/
 
-# User-supplied test fixtures (audio dropped in by contributors per .gitkeep)
+# User-supplied test fixtures (audio dropped in by contributors per .gitkeep).
+# audio.mp3 + audio.mp3.txt are the canonical clone-test pair committed to the
+# repo so tests/integration/e2e_qwen3_modes.sh runs deterministically on a
+# fresh clone (the .txt is the spoken transcript of the .mp3 — used as the
+# Qwen3-TTS ICL reference text).
 tests/integration/.fixtures/*
 !tests/integration/.fixtures/.gitkeep
+!tests/integration/.fixtures/audio.mp3
+!tests/integration/.fixtures/audio.mp3.txt
 /.e2e-cache
 .claude
