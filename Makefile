@@ -34,7 +34,8 @@ DEV_RUN_TTY := docker run --rm -it \
         run run-cuda \
         test test-unit test-integration \
         lint format check clean \
-        pkg-lock pkg-upgrade pkg-add pkg-remove pkg-update
+        pkg-lock pkg-upgrade pkg-add pkg-remove pkg-update \
+        compile-heavy
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -76,6 +77,9 @@ pkg-update: dev-image ## Upgrade ONE package (usage: make pkg-update PKG=name)
 	@test -n "$(PKG)" || (echo "usage: make pkg-update PKG=name" >&2; exit 1)
 	$(BUMP_HOST)
 	$(DEV_RUN) uv lock --upgrade-package $(PKG)
+
+compile-heavy: ## Recompile hash-locked requirements-heavy-{cpu,cuda}.txt from scripts/heavy-deps-*.in
+	bash scripts/compile-heavy-deps.sh
 
 # -----------------------------------------------------------------------------
 # Production image builds.

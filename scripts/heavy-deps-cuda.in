@@ -1,0 +1,36 @@
+# CUDA variant — heavy ML stack for Dockerfile.cuda
+# torch cu126 wheels from https://download.pytorch.org/whl/cu126
+# Edit versions here, then run: make compile-heavy
+#
+# Pin rationale:
+#   torch/torchaudio 2.9.1+cu126  — Nov 2025, NeMo 2.7.3 needs torch>=2.6.0.
+#   nemo-toolkit[asr] 2.7.3       — Apr 2026, adds canary2 prompt formatter.
+#   lightning/pytorch-lightning 2.4.0 — NeMo 2.7.3 hard-pins lightning<=2.4.0.
+#   huggingface-hub 0.35.3        — last release with symlink->copy fallback (SMB cache).
+#   transformers 4.57.3           — qwen-tts hard-pin; within NeMo's ~=4.57.0 tolerance.
+#   faster-qwen3-tts 0.2.6        — CUDA-graph-optimized Qwen3-TTS wrapper (MIT).
+#
+# Known open CVEs (threat-modelled; not exploitable in this app):
+#   PYSEC-2026-139 (torch pt2 load): we don't torch.load() untrusted files.
+#   GHSA-75m9-98v2-hjpm (PL load_from_checkpoint): we don't call it.
+#   GHSA-69w3-r845-3855 / PYSEC-2025-217 (transformers Trainer): we don't train.
+torch==2.9.1+cu126
+torchaudio==2.9.1+cu126
+nemo-toolkit[asr]==2.7.3
+lightning==2.4.0
+pytorch-lightning==2.4.0
+transformers==4.57.3
+huggingface-hub==0.35.3
+soundfile==0.13.1
+librosa==0.10.2
+matplotlib==3.9.2
+faster-whisper==1.2.0
+ctranslate2==4.6.0
+silero-vad==6.0.0
+onnxruntime==1.20.1
+onnxruntime-gpu==1.20.1
+numpy==1.26.4
+kokoro==0.9.4
+phonemizer-fork==3.3.2
+faster-qwen3-tts==0.2.6
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

@@ -1,0 +1,21 @@
+# CPU variant — heavy ML stack for Dockerfile (not Dockerfile.cuda)
+# torch CPU wheels from https://download.pytorch.org/whl/cpu
+# Edit versions here, then run: make compile-heavy
+torch==2.9.1+cpu
+torchaudio==2.9.1+cpu
+nemo-toolkit[asr]==2.7.3
+lightning==2.4.0
+pytorch-lightning==2.4.0
+transformers==4.57.6
+huggingface-hub==0.35.3
+soundfile==0.13.1
+librosa==0.10.2
+matplotlib==3.9.2
+faster-whisper==1.2.0
+ctranslate2==4.6.0
+silero-vad==6.0.0
+onnxruntime==1.20.1
+numpy==1.26.4
+kokoro==0.9.4
+phonemizer-fork==3.3.2
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
