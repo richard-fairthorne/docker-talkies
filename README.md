@@ -24,7 +24,7 @@ The same client you use against `api.openai.com` works here — only the base UR
 - **Hot model swap + idle eviction** — one GPU pool serves both modalities, Ollama-style `/api/ps` for introspection, `DELETE /api/ps/<slug>` to evict.
 - **MCP server built in** at `/v1/mcp` — Claude / Cursor / IDE-side LLMs can call transcribe + speak as tools.
 - **Stereo diarization** without bolting on a separate model — left channel = speaker L, right = speaker R, chronological `L:` / `R:` turn lines.
-- **CPU + CUDA images** — `psyb0t/talkies:latest` (CPU + Kokoro + 4 ASR models) and `:latest-cuda` (everything, ~11 GB VRAM at full load).
+- **CPU + CUDA images** — `psyb0t/talkies:latest` (CPU + Kokoro × 2 runtimes + 4 ASR models incl. multilingual Nemotron-3.5-ASR via parakeet.cpp) and `:latest-cuda` (everything, ~11 GB VRAM at full load).
 
 ## Quick start
 
@@ -153,7 +153,7 @@ GPU variant (`psyb0t/talkies:latest-cuda` + `--gpus all`) ships everything; the 
 
 ## Supported models
 
-Seven ASR models + seven TTS slugs (two engines: Kokoro × 2 runtimes, Qwen3-TTS × 5 model variants), all publicly available with permissive licenses. They split into five engine families:
+Eight ASR models + seven TTS slugs (engine mix: faster-whisper × 2, NeMo (Parakeet TDT + 3× Canary), parakeet.cpp/ggml × 1, Kokoro × 2 runtimes, Qwen3-TTS × 5 model variants), all publicly available with permissive licenses. They split into six engine families:
 
 ### ASR (`POST /v1/audio/transcriptions`)
 
@@ -165,8 +165,15 @@ Seven ASR models + seven TTS slugs (two engines: Kokoro × 2 runtimes, Qwen3-TTS
 | `canary-180m-flash` | `nvidia/canary-180m-flash` | NeMo Canary (multitask) | CPU + CUDA | English (ASR only on this size) | CC-BY-4.0 |
 | `canary-1b-flash` | `nvidia/canary-1b-flash` | NeMo Canary (multitask) | CUDA only | en, de, fr, es (ASR + X→en / en→X translation) | CC-BY-4.0 |
 | `canary-qwen-2.5b` | `nvidia/canary-qwen-2.5b` | NeMo Canary SALM (Qwen2 decoder) | CUDA only | English | CC-BY-4.0 |
+| `nemotron-3.5-asr-0.6b` | `mudler/parakeet-cpp-gguf` (gguf: `nemotron-3.5-asr-streaming-0.6b-q8_0.gguf`) | parakeet.cpp / ggml C++ runtime — **CPU-only**, runs in both images | CPU + CUDA (CPU inference) | 40+ locales (auto-detect; pin via `language=`) | OpenMDW-1.1 |
 
-Both Whisper variants are tokenized + executed through [faster-whisper](https://github.com/SYSTRAN/faster-whisper), which is roughly 4× faster than the reference OpenAI implementation at the same accuracy on the same hardware. The four NVIDIA models go through NeMo's native inference path — Parakeet uses the TDT decoder, Canary models use the multitask transformer head, Canary-Qwen swaps the decoder for a Qwen2 LLM (the "speech-augmented language model" trick that lets you tack instructions onto the prompt).
+Both Whisper variants are tokenized + executed through [faster-whisper](https://github.com/SYSTRAN/faster-whisper), which is roughly 4× faster than the reference OpenAI implementation at the same accuracy on the same hardware. The four NVIDIA NeMo models go through NeMo's native inference path — Parakeet uses the TDT decoder, Canary models use the multitask transformer head, Canary-Qwen swaps the decoder for a Qwen2 LLM (the "speech-augmented language model" trick that lets you tack instructions onto the prompt).
+
+`nemotron-3.5-asr-0.6b` is the new entry: NVIDIA's [Nemotron-3.5-ASR-Streaming-0.6B](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b) (OpenMDW-1.1) served through [mudler/parakeet.cpp](https://github.com/mudler/parakeet.cpp) — a C++17/ggml port that's WER-0 against NeMo's PyTorch runtime on every published checkpoint (validated parity matrix in `parakeet.cpp`'s `docs/parity.md`) and ~1.5-2× faster than NeMo on CPU. The shipped `libparakeet.so` is built CPU-only (no `-DPARAKEET_GGML_CUDA`) so the same `.so` runs in both the CPU and CUDA images — the CUDA image bundles it but doesn't offload parakeet.cpp inference to the GPU. We dlopen the lib from a ctypes wrapper (`src/talkies/models/parakeet_cpp.py`); no Python NeMo on the inference hot path. Two integration knobs:
+- **40+ language coverage** including en, es, de, fr, it, ar, ja, ko, pt, ru, hi, zh, vi, he, nl, cs, da, pl, no, sv, th, tr, bg. Pass `language=<locale>` on the request to pin (uses the C-API's prompt-conditioned lang path); omit or send `language=auto` to let the model pick (the JSON code path is exercised here — adds per-word timestamps + confidence to the response).
+- **Single-file GGUF** model layout. The registry entry's `gguf_file` field selects exactly one quant variant from the multi-quant `mudler/parakeet-cpp-gguf` repo (default `q8_0`, ~984 MB, near-lossless) so the entrypoint's prefetch doesn't pull every quant.
+
+The backend strips the model's trailing `<en-us>` / `<de-de>` language token before returning (it would otherwise leak into round-trip tests and downstream pipelines). Segments are synthesized from the per-word timestamps by silence-gap grouping (0.5 s threshold) so the verbose_json shape matches Whisper's.
 
 ### TTS (`POST /v1/audio/speech`)
 
@@ -257,6 +264,10 @@ A short list of things that look like they might work but don't, so you don't wa
 | **Qwen3-TTS `voice` on `voice_design`** | Ignored | The model invents a voice from `instructions`; the `voice` field is meaningless for this slug. Catalog returns the sentinel `["design"]` so OpenAI clients with strict voice validation still work. |
 | **Qwen3-TTS on CPU (all 5 slugs)** | Startup error | `faster-qwen3-tts` captures CUDA graphs at load time; there's no CPU path. The CPU image (`psyb0t/talkies:latest`) doesn't include the Qwen3-TTS dependencies at all — only the CUDA image (`psyb0t/talkies:latest-cuda`) does. |
 | **Bit-identical re-synth on `voice_design`** | Not guaranteed | Two calls with the same `instructions` produce two different voices — sampling is stochastic. Repeat-stability isn't a goal of the upstream model. |
+| **Nemotron-3.5-ASR `task=s2t_translation`** | 400 | parakeet.cpp does ASR only — no translation head. Use a Canary slug if you need X→en / en→X. |
+| **Nemotron-3.5-ASR per-token confidence in verbose_json with `language=<locale>`** | Stripped | The C-API has a JSON-output path AND a language-pinned path but no combined "lang + JSON" entry point (yet). When `language=` is set we use the lang-pinned path, which returns plain text only — `words` and `segments` come back empty. Send `language=auto` (or omit) to get full per-word timestamps + synthesized segments. |
+| **Nemotron-3.5-ASR streaming HTTP body** | Not supported via API | parakeet.cpp's C-API exposes a streaming session (`parakeet_capi_stream_*`), but talkies doesn't wire it to `/v1/audio/transcriptions` yet — the route always returns the full transcription in one body. The PCM-streaming work is on `/v1/audio/speech` (TTS). |
+| **Parakeet TDT / RNNT / hybrid checkpoints via `parakeet_cpp`** | Not registered (out of the box) | The `parakeet_cpp` executor supports every Parakeet GGUF in `mudler/parakeet-cpp-gguf`, but the shipped `models.json` only registers the Nemotron-3.5 streaming variant. Drop a custom `models.json` (or override the file) to add e.g. `parakeet-tdt_ctc-110m` (English, 110M, very fast on CPU) as a `parakeet_cpp` slug with the matching `gguf_file`. |
 
 ## API — `POST /v1/audio/transcriptions`
 
@@ -852,10 +863,10 @@ If you don't set the env var (or set it to an empty string), talkies stays wide 
 
 | Image | Tag | Platforms | Models served | Image size (approx) |
 |---|---|---|---|---|
-| CPU | `psyb0t/talkies:latest` | `linux/amd64` | 3× Whisper, 1× Canary-180m-Flash, Kokoro-82M | ~3 GB |
-| CUDA | `psyb0t/talkies:latest-cuda` | `linux/amd64` | all seven ASR + Kokoro-82M (×2 runtimes) + Qwen3-TTS (all 5 mode variants — Base 0.6B/1.7B, CustomVoice 0.6B/1.7B, VoiceDesign 1.7B) | ~12 GB |
+| CPU | `psyb0t/talkies:latest` | `linux/amd64` | 2× Whisper, 1× Canary-180m-Flash, Nemotron-3.5-ASR-0.6B (parakeet.cpp), Kokoro-82M ×2 runtimes | ~3 GB |
+| CUDA | `psyb0t/talkies:latest-cuda` | `linux/amd64` | all eight ASR + Kokoro-82M (×2 runtimes) + Qwen3-TTS (all 5 mode variants — Base 0.6B/1.7B, CustomVoice 0.6B/1.7B, VoiceDesign 1.7B) | ~12 GB |
 
-Why split the model list? Whisper and the tiny Canary work fine on CPU. Parakeet-TDT, Canary-1B-Flash, Canary-Qwen-2.5B, and Qwen3-TTS-0.6B don't — Parakeet-TDT is awkward on CPU because its decoder is autoregressive and slow without batched-attention kernels, Canary-1B and Canary-Qwen are flat-out too big to be useful in software-only inference, and Qwen3-TTS via `faster-qwen3-tts` captures CUDA graphs at load time (no CPU code path exists). Rather than ship a CPU image that *technically* serves models nobody would use on CPU, the CPU image only lists what'll actually finish in a sane time. Kokoro-82M ships in both images — at 82M params it synthesizes faster than real-time on a 4-core CPU.
+Why split the model list? Whisper, the tiny Canary, and Nemotron-3.5-ASR via parakeet.cpp work fine on CPU. Parakeet-TDT, Canary-1B-Flash, Canary-Qwen-2.5B, and Qwen3-TTS-0.6B don't — Parakeet-TDT (NeMo path, not parakeet.cpp) is awkward on CPU because its decoder is autoregressive and slow without batched-attention kernels, Canary-1B and Canary-Qwen are flat-out too big to be useful in software-only inference, and Qwen3-TTS via `faster-qwen3-tts` captures CUDA graphs at load time (no CPU code path exists). Nemotron-3.5-ASR-0.6B via parakeet.cpp is the one model in the autoregressive-streaming class that runs well on CPU — the ggml C++ runtime is 1.5-2× faster than NeMo's PyTorch path there. The shipped parakeet.cpp build is CPU-only in both images (no `-DPARAKEET_GGML_CUDA` — wiring the CUDA backend requires a CUDA dev toolchain in the builder stage and per-arch nvcc compilation that bloats the build cost out of proportion to the speedup at the 0.6B scale). Rather than ship a CPU image that *technically* serves models nobody would use on CPU, the CPU image only lists what'll actually finish in a sane time. Kokoro-82M ships in both images — at 82M params it synthesizes faster than real-time on a 4-core CPU.
 
 Both images are amd64-only — `nemo_toolkit[asr]` and `faster-whisper` have aarch64 wheels for some of the chain but the full stack doesn't currently resolve cleanly on arm64 at the pinned versions. If you need arm64, file an issue with your specific use case.
 
@@ -950,7 +961,8 @@ Or point `TALKIES_MODELS_FILE` at a different path inside the container. The fil
 | Field | Required | Notes |
 |---|---|---|
 | `repo` | yes | HuggingFace repo id. talkies pulls via `snapshot_download(local_dir=$TALKIES_DATA_DIR/models/<slug>)` so each model lives as a flat directory keyed by its slug. |
-| `executor` | yes | One of `whisper`, `parakeet`, `canary_multitask`, `canary_salm`, `kokoro`, `kokoro_nvidia`, `qwen3_tts`. Other values fail startup. |
+| `executor` | yes | One of `whisper`, `parakeet`, `parakeet_cpp`, `canary_multitask`, `canary_salm`, `kokoro`, `kokoro_nvidia`, `qwen3_tts`. Other values fail startup. |
+| `gguf_file` | no | `parakeet_cpp` executor only. Filename of the specific GGUF quant variant inside the HF repo (e.g. `nemotron-3.5-asr-streaming-0.6b-q8_0.gguf`). Required when the repo ships multiple GGUFs in one directory (the entrypoint's prefetch uses it as the `allow_patterns` filter so only that one file is downloaded — saves multi-GB of unused quant variants). Omit when the repo has one obvious GGUF and you want the alphabetical first. |
 | `modality` | no | `asr` (default) or `tts`. Used by `/v1/models` filtering and by the endpoint guards. The TTS executors (`kokoro` / `kokoro_nvidia` / `qwen3_tts`) imply `tts`; ASR executors imply `asr`. |
 | `default_source_lang` | no | ASR only. Used when the request omits `language`. |
 | `default_target_lang` | no | ASR only. Used by Canary multitask for translation tasks. |
@@ -961,7 +973,7 @@ Or point `TALKIES_MODELS_FILE` at a different path inside the container. The fil
 | `languages` | no | Informational only — listed in error messages, not enforced. |
 | `dependencies` | no | List of extra HuggingFace repo ids the executor needs at load time (e.g. `canary-qwen-2.5b` instantiates a Qwen3 tokenizer separately from its own snapshot). Each is `snapshot_download`'d at entrypoint time into the standard HF cache (`HF_HOME`) so `transformers`/`AutoTokenizer` find it offline. |
 
-Adding a new slug pointing at a new repo "just works" if the repo follows the same conventions as the executor expects (a faster-whisper CT2 dir for `whisper`, a NeMo `.nemo` checkpoint for `parakeet`/`canary_*`, a Kokoro-style `config.json` + `kokoro-v*.pth` + `voices/*.pt` layout for `kokoro`, a Qwen3-TTS HF repo with the matching `tts_model_type` for `qwen3_tts` — pair `qwen3_mode` accordingly). Adding a brand-new executor family means editing `talkies/models/__init__.py` to register the dispatch.
+Adding a new slug pointing at a new repo "just works" if the repo follows the same conventions as the executor expects (a faster-whisper CT2 dir for `whisper`, a NeMo `.nemo` checkpoint for `parakeet`/`canary_*`, a GGUF file for `parakeet_cpp` — set `gguf_file` to the specific quant name, a Kokoro-style `config.json` + `kokoro-v*.pth` + `voices/*.pt` layout for `kokoro`, a Qwen3-TTS HF repo with the matching `tts_model_type` for `qwen3_tts` — pair `qwen3_mode` accordingly). Adding a brand-new executor family means editing `talkies/models/__init__.py` to register the dispatch.
 
 A common reason to ship a custom `models.json`: enabling translation directions on Canary-1B-Flash. See [Translation](#translation-canary-xy).
 
@@ -1006,8 +1018,25 @@ CUDA-only end-to-end suite that builds `psyb0t/talkies:local-cuda`, spawns a fre
 
 - Endpoint smoke (`test_endpoints.sh`): `/healthz`, `/v1/models`, `/api/ps`, `/unload`, 404/422 paths.
 - Per-model transcription (`test_transcribe.sh`): every enabled model goes through `json`, `verbose_json`, `srt`, and `vtt` against a fixture audio file. Also asserts `/api/ps` reflects loads and that `DELETE /api/ps/<slug>` actually unloads.
+- Per-model speech (`test_speech.sh`): every TTS slug across all 6 output formats, voice catalog, error contract.
+- Focused per-engine e2e files (`e2e_*.sh`): `e2e_qwen3_modes.sh` (12 cases — all three Qwen3-TTS modes + sampling extras + voice cloning via mounted fixture), `e2e_kokoro_nvidia.sh` (kokoro-82m-nvidia ONNX path), `e2e_nemotron_asr.sh` (Nemotron-3.5-ASR via parakeet.cpp — listing, transcription round-trip, per-word + synthesized segment timestamps, explicit-language path, bad-locale guard).
 
-Drop a short clip (a few seconds is plenty) at `tests/integration/.fixtures/audio.<wav|mp3|m4a|flac|ogg>` — the harness picks it up automatically; the transcription tests skip if it's missing.
+Drop a short clip (a few seconds is plenty) at `tests/integration/.fixtures/audio.<wav|mp3|m4a|flac|ogg>` — the harness picks it up automatically; the transcription tests skip if it's missing. The Qwen3 cloning and Nemotron-3.5 round-trip suites both rely on the canonical `tests/integration/.fixtures/audio.mp3` + `audio.mp3.txt` pair (transcript: "You are just a line of code.") that ships in-repo.
+
+**Per-test filter** — any positional args passed to an `e2e_*.sh` (or `test_*.sh`) file act as a whitelist over its test functions. Match is exact OR substring, so a one-word arg re-runs every case whose function name contains it. Lets you iterate on a single failing case without recycling the whole harness:
+
+```bash
+# Run only this one case
+bash tests/integration/e2e_qwen3_modes.sh test_qwen3_clone_icl_1_7b
+
+# Substring → every test whose name contains "sampling"
+bash tests/integration/e2e_qwen3_modes.sh sampling
+
+# Multiple filters → union
+bash tests/integration/e2e_nemotron_asr.sh fixture explicit_language
+```
+
+The summary line at the end shows pass / fail / skip counts; `HARNESS_VERBOSE=1` also prints the skipped names so you can spot a misspelled filter.
 
 Env knobs:
 

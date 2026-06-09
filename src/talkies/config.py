@@ -170,6 +170,7 @@ def load_registry() -> dict[str, dict]:
         if executor not in (
             "whisper",
             "parakeet",
+            "parakeet_cpp",
             "canary_multitask",
             "canary_salm",
             "kokoro",
@@ -178,8 +179,8 @@ def load_registry() -> dict[str, dict]:
         ):
             raise ValueError(
                 f"{MODELS_FILE}: model {model_id!r} executor={executor!r} must be one of "
-                "'whisper', 'parakeet', 'canary_multitask', 'canary_salm', 'kokoro', "
-                "'kokoro_nvidia', 'qwen3_tts'"
+                "'whisper', 'parakeet', 'parakeet_cpp', 'canary_multitask', 'canary_salm', "
+                "'kokoro', 'kokoro_nvidia', 'qwen3_tts'"
             )
     if ENABLED_MODELS:
         missing = [s for s in ENABLED_MODELS if s not in models]

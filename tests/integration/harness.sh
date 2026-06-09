@@ -41,6 +41,22 @@ TALKIES_BASE_URL=""
 HARNESS_ENABLED_MODELS=""
 HARNESS_CONTAINER=""
 
+# Snapshot the calling script's positional args BEFORE the e2e file's
+# `set -e` / source chain potentially clobbers $@. Any args passed to
+# `bash e2e_foo.sh <test_a> <test_b>` become the per-test whitelist
+# consumed inside harness_run_tests.
+HARNESS_TEST_FILTER=("$@")
+
+# Substring-or-exact match against HARNESS_TEST_FILTER.
+_harness_test_matches() {
+    local t="$1" pat
+    for pat in "${HARNESS_TEST_FILTER[@]}"; do
+        [ "$t" = "$pat" ] && return 0
+        case "$t" in *"$pat"*) return 0 ;; esac
+    done
+    return 1
+}
+
 # ── pre-flight ───────────────────────────────────────────────────────────────
 
 harness_preflight() {
@@ -154,11 +170,24 @@ harness_start() {
 # harness_run_tests <test_func> [<test_func> ...]
 # Invokes each named bash function, counts pass/fail, prints a summary, and
 # returns 0 only if every test passed.
+#
+# Per-test filter — any positional args passed to the calling e2e file land
+# in HARNESS_TEST_FILTER (set at source time) and act as a whitelist.
+# Match: exact function name OR substring. Empty filter = run them all.
+# Lets operators re-run just the failed cases without re-cycling the harness:
+#
+#     bash e2e_qwen3_modes.sh test_qwen3_clone_icl_1_7b
+#     bash e2e_qwen3_modes.sh sampling          # substring → both sampling tests
 harness_run_tests() {
-    local pass=0 fail=0
-    local failed=()
+    local pass=0 fail=0 skipped=0
+    local failed=() skip=()
     local t
     for t in "$@"; do
+        if [ "${#HARNESS_TEST_FILTER[@]}" -gt 0 ] && ! _harness_test_matches "$t"; then
+            skipped=$((skipped + 1))
+            skip+=("$t")
+            continue
+        fi
         echo ""
         echo "──[ $t ]──"
         if "$t"; then
@@ -170,10 +199,16 @@ harness_run_tests() {
     done
     echo ""
     echo "═══════════════════════════════════════════════════════════"
-    echo "  $(basename "${BASH_SOURCE[1]:-suite}"): pass=$pass fail=$fail total=$((pass + fail))"
+    echo "  $(basename "${BASH_SOURCE[1]:-suite}"): pass=$pass fail=$fail skip=$skipped total=$((pass + fail + skipped))"
     if [ "$fail" -ne 0 ]; then
         echo "  failed:"
         for t in "${failed[@]}"; do
+            echo "    - $t"
+        done
+    fi
+    if [ "$skipped" -ne 0 ] && [ "${HARNESS_VERBOSE:-0}" = "1" ]; then
+        echo "  skipped by filter:"
+        for t in "${skip[@]}"; do
             echo "    - $t"
         done
     fi

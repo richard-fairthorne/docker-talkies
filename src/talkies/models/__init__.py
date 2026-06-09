@@ -9,6 +9,7 @@ from .kokoro import KokoroBackend
 from .kokoro_nvidia import KokoroNvidiaBackend
 from .multitask import MultitaskBackend
 from .parakeet import ParakeetBackend
+from .parakeet_cpp import ParakeetCppBackend
 from .qwen3_tts import Qwen3TTSBackend
 from .salm import SalmBackend
 from .whisper import WhisperBackend
@@ -34,6 +35,18 @@ def build_backends(registry: dict[str, dict], device: str) -> dict[str, Any]:
                 repo=repo,
                 model_path=model_path,
                 device=device,
+            )
+            continue
+        if executor == "parakeet_cpp":
+            gguf_file = entry.get("gguf_file")
+            default_lang = entry.get("default_source_lang", "auto")
+            out[model_id] = ParakeetCppBackend(
+                model_id=model_id,
+                repo=repo,
+                model_path=model_path,
+                device=device,
+                gguf_file=gguf_file,
+                default_lang=default_lang,
             )
             continue
         if executor == "canary_salm":

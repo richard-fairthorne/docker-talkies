@@ -74,10 +74,17 @@ docker-compose.override.yml
 docker-compose.dev.yaml
 docker-compose.dev.yml
 
-# Model snapshots (when developing locally)
+# Model snapshots (when developing locally) — same patterns mirrored in
+# .dockerignore so weight files never enter git history OR the build context.
 /models/
 *.safetensors
 *.bin
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.nemo
+*.ckpt
 
 # Local /data dir (when running `make run` against ~/.talkies-data)
 .talkies-data/

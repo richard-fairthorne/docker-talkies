@@ -16,6 +16,15 @@
       "default_task": "asr",
       "languages": ["en"]
     },
+    "nemotron-3.5-asr-0.6b": {
+      "repo": "mudler/parakeet-cpp-gguf",
+      "executor": "parakeet_cpp",
+      "gguf_file": "nemotron-3.5-asr-streaming-0.6b-q8_0.gguf",
+      "default_source_lang": "auto",
+      "default_target_lang": "en",
+      "default_task": "asr",
+      "languages": ["auto", "en", "es", "de", "fr", "it", "ar", "ja", "ko", "pt", "ru", "hi", "zh", "vi", "he", "nl", "cs", "da", "pl", "no", "sv", "th", "tr", "bg"]
+    },
     "kokoro-82m": {
       "repo": "hexgrad/Kokoro-82M",
       "executor": "kokoro",

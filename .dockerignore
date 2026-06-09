@@ -73,6 +73,13 @@ venv
 
 # Research dirs (cloned upstream repos for reference)
 .research_files
+index-tts/
+
+# Agent / harness local state
+.agents/
+.brutal-review.md
+.brutal-review-*.md
+about.txt
 
 # Things the production image doesn't need
 README.md
@@ -84,3 +91,31 @@ models/
 tests/
 benchs/
 scripts/
+
+# Integration-test cache — host-side HF model snapshots downloaded by
+# tests/integration/harness.sh into HARNESS_CACHE_DIR. Tens of GB of weights.
+# WITHOUT THIS, every `make build*` ships 20+ GB to the docker daemon as
+# build context, even though the Dockerfile never COPYs it.
+.e2e-cache
+.talkies-test-cache
+
+# Claude Code's local state (transcripts, settings) — never ship to image.
+.claude
+
+# Model weight files — defensive catch-all. Production images get their
+# weights via runtime snapshot_download into /data, never via the build
+# context. If a contributor drops a *.gguf / *.safetensors / *.bin / *.pt /
+# *.pth into the repo root for testing, this prevents it from inflating
+# the context and the image.
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.nemo
+*.ckpt
+
+# Build cache from the local parakeet.cpp checkout (if cloned at root for
+# debugging) — never ships.
+parakeet.cpp/

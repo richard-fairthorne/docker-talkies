@@ -49,6 +49,42 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         -r requirements-heavy-cpu.txt
 
 # -----------------------------------------------------------------------------
+# parakeet.cpp build stage — produces libparakeet.so used by the parakeet_cpp
+# backend (multilingual ASR via NVIDIA Parakeet + Nemotron-3.5-ASR via ggml/C++).
+# MIT-licensed. CPU-only build (no -DPARAKEET_GGML_CUDA) — the same .so works
+# in both CPU and CUDA images. Pinned by full commit SHA.
+FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS parakeet-builder
+
+ARG PARAKEET_CPP_SHA=e270af73b94c9a5c37ec516230219ed4580e1db6
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone https://github.com/mudler/parakeet.cpp /src/parakeet.cpp \
+    && cd /src/parakeet.cpp \
+    && git checkout "${PARAKEET_CPP_SHA}" \
+    && git submodule update --init --recursive
+
+WORKDIR /src/parakeet.cpp
+RUN cmake -B build \
+        -DPARAKEET_SHARED=ON \
+        -DPARAKEET_BUILD_CLI=ON \
+        -DPARAKEET_BUILD_TESTS=OFF \
+        -DGGML_NATIVE=OFF \
+    && cmake --build build -j "$(nproc)" \
+    && mkdir -p /out/lib /out/bin /out/include \
+    && cp -P build/libparakeet.so* /out/lib/ \
+    && cp -P build/third_party/ggml/src/libggml*.so* /out/lib/ \
+    && cp build/examples/cli/parakeet-cli /out/bin/ \
+    && cp include/parakeet_capi.h /out/include/ \
+    && cp include/parakeet.h /out/include/
+
+# -----------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -74,6 +110,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
+
+# parakeet.cpp shared libs (libparakeet + libggml*) + CLI for the parakeet_cpp
+# ASR backend. LD_LIBRARY_PATH below makes the ggml deps resolve at dlopen.
+COPY --from=parakeet-builder /out/lib/ /opt/parakeet/lib/
+COPY --from=parakeet-builder /out/bin/parakeet-cli /usr/local/bin/parakeet-cli
+ENV LD_LIBRARY_PATH="/opt/parakeet/lib:${LD_LIBRARY_PATH}"
+ENV TALKIES_PARAKEET_CPP_LIB=/opt/parakeet/lib/libparakeet.so
+
 COPY --chown=talkies:talkies src ./src
 COPY --chown=talkies:talkies pyproject.toml ./
 COPY --chown=talkies:talkies models-cpu.json /app/models.json

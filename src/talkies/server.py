@@ -44,6 +44,35 @@ from .models import build_backends, is_asr_backend, is_tts_backend
 from .models.base import TranscribeResult
 
 
+async def _wait_for_gpu_drain() -> None:
+    """Block until in-flight CUDA deallocations have actually completed.
+
+    Each backend's ``unload()`` calls ``torch.cuda.empty_cache()`` and
+    returns. That call hands the work to the CUDA driver which finishes
+    asynchronously — the Python side gets control back BEFORE the GPU
+    blocks are actually returned to the allocator pool. On a memory-tight
+    host the next ``backend.get_model()`` then races against the still-
+    freeing buffers and the load OOMs (typical failure: ctranslate2 +
+    NeMo back-to-back on a single GPU).
+
+    A single ``torch.cuda.synchronize()`` waits for the device to finish
+    every queued op, including the dealloc work, before we return. Cheap
+    when the device is already idle (microseconds); the right barrier
+    otherwise. Importing torch lazily so non-CUDA images stay light.
+    """
+    def _sync() -> None:
+        try:
+            import torch
+        except ImportError:
+            return
+        if not torch.cuda.is_available():
+            return
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    await asyncio.to_thread(_sync)
+
+
 _VERBOSE_FORMATS = {"verbose_json", "srt", "vtt"}
 
 
@@ -426,6 +455,7 @@ async def speech(body: SpeechRequest) -> Response:
         await asyncio.gather(
             *(b.unload() for _, b in siblings), return_exceptions=True
         )
+        await _wait_for_gpu_drain()
 
     # PCM streaming path — only when the backend natively supports it
     # (currently Qwen3-TTS only). Yields int16 LE PCM chunks as they are
@@ -632,6 +662,7 @@ async def run_transcription_pipeline(
         await asyncio.gather(
             *(b.unload() for _, b in siblings), return_exceptions=True
         )
+        await _wait_for_gpu_drain()
 
     if do_diarize:
         l_path, r_path = await asyncio.to_thread(
