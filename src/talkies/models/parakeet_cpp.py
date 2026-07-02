@@ -35,7 +35,6 @@ from typing import Any
 
 from .base import TranscribeResult
 
-
 DEFAULT_LIB_PATH = "/opt/parakeet/lib/libparakeet.so"
 
 # Nemotron-3.5-ASR is prompt-conditioned and echoes a language tag at the end
@@ -48,6 +47,7 @@ _LANG_TAG_RE = re.compile(r"\s*<[a-z]{2,3}(?:-[a-z]{2,4})?>\s*$", re.IGNORECASE)
 
 def _strip_lang_tag(text: str) -> str:
     return _LANG_TAG_RE.sub("", text).strip()
+
 
 # Decoder selector (matches parakeet_capi.h):
 #   0 = default (transducer for TDT/RNNT/hybrid, CTC for standalone CTC)
@@ -85,7 +85,9 @@ class _CAPI:
 
         c.parakeet_capi_transcribe_path_json.restype = ctypes.c_void_p
         c.parakeet_capi_transcribe_path_json.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
         ]
 
         # parakeet.cpp C-API v3 added the lang-aware non-JSON variant for
@@ -96,7 +98,10 @@ class _CAPI:
         # (trades timestamps for language selection on nemotron).
         c.parakeet_capi_transcribe_path_lang.restype = ctypes.c_void_p
         c.parakeet_capi_transcribe_path_lang.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
         ]
 
         c.parakeet_capi_free_string.restype = None
@@ -214,7 +219,7 @@ class ParakeetCppBackend:
         *,
         source_lang: str | None,
         target_lang: str | None,  # noqa: ARG002 — parakeet.cpp doesn't translate
-        task: str,                # noqa: ARG002 — only "asr" is meaningful here
+        task: str,  # noqa: ARG002 — only "asr" is meaningful here
         with_timestamps: bool = False,  # noqa: ARG002 — JSON path always returns them
     ) -> TranscribeResult:
         if task and task != "asr":
@@ -230,7 +235,9 @@ class ParakeetCppBackend:
             self._last_used = time.monotonic()
             return result
 
-    def _transcribe_sync(self, ctx: int, audio_path: str, lang: str) -> TranscribeResult:
+    def _transcribe_sync(
+        self, ctx: int, audio_path: str, lang: str
+    ) -> TranscribeResult:
         capi = _CAPI.get()
         # Use the lang-aware non-JSON path for explicit language selection on
         # prompt-conditioned models (nemotron). For models without prompt
@@ -249,11 +256,10 @@ class ParakeetCppBackend:
                 lang.encode("utf-8"),
             )
             if not text_ptr:
-                err = (capi.lib.parakeet_capi_last_error(ctypes.c_void_p(ctx))
-                       or b"").decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"parakeet_capi_transcribe_path_lang failed: {err}"
-                )
+                err = (
+                    capi.lib.parakeet_capi_last_error(ctypes.c_void_p(ctx)) or b""
+                ).decode("utf-8", errors="replace")
+                raise RuntimeError(f"parakeet_capi_transcribe_path_lang failed: {err}")
             try:
                 text = ctypes.string_at(text_ptr).decode("utf-8", errors="replace")
             finally:
@@ -274,11 +280,10 @@ class ParakeetCppBackend:
             _DECODER_DEFAULT,
         )
         if not json_ptr:
-            err = (capi.lib.parakeet_capi_last_error(ctypes.c_void_p(ctx))
-                   or b"").decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"parakeet_capi_transcribe_path_json failed: {err}"
-            )
+            err = (
+                capi.lib.parakeet_capi_last_error(ctypes.c_void_p(ctx)) or b""
+            ).decode("utf-8", errors="replace")
+            raise RuntimeError(f"parakeet_capi_transcribe_path_json failed: {err}")
         try:
             doc = ctypes.string_at(json_ptr).decode("utf-8", errors="replace")
         finally:
@@ -329,18 +334,24 @@ def _segments_from_words(words: list[dict]) -> list[dict]:
         start = float(w.get("start", 0.0))
         end = float(w.get("end", 0.0))
         if start - prev_end > _SEGMENT_GAP_THRESHOLD_S:
-            segments.append(_pack_segment(len(segments), seg_start, prev_end, current_words))
+            segments.append(
+                _pack_segment(len(segments), seg_start, prev_end, current_words)
+            )
             current_words = []
             seg_start = start
         current_words.append(w)
         prev_end = end
     if current_words:
-        segments.append(_pack_segment(len(segments), seg_start, prev_end, current_words))
+        segments.append(
+            _pack_segment(len(segments), seg_start, prev_end, current_words)
+        )
     return segments
 
 
 def _pack_segment(seg_id: int, start: float, end: float, words: list[dict]) -> dict:
-    text = " ".join((w.get("word") or "").strip() for w in words if (w.get("word") or "").strip())
+    text = " ".join(
+        (w.get("word") or "").strip() for w in words if (w.get("word") or "").strip()
+    )
     return {
         "id": seg_id,
         "start": start,

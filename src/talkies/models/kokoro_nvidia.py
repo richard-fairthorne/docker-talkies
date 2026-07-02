@@ -36,7 +36,6 @@ from typing import Any
 
 from .base import SynthesisResult
 
-
 SAMPLE_RATE = 24000
 
 VOICE_DIM = 256
@@ -48,13 +47,20 @@ MAX_PHONEME_LENGTH = VOICE_TOKEN_LEN - 2
 # Voice name prefix → espeak-ng lang code. Mirrors hexgrad/Kokoro-82M's
 # VOICES.md mapping. zh/ja are intentionally absent — see module docstring.
 _PREFIX_TO_LANG: dict[str, str] = {
-    "af_": "en-us", "am_": "en-us",
-    "bf_": "en-gb", "bm_": "en-gb",
-    "ef_": "es",    "em_": "es",
-    "ff_": "fr-fr", "fm_": "fr-fr",
-    "hf_": "hi",    "hm_": "hi",
-    "if_": "it",    "im_": "it",
-    "pf_": "pt-br", "pm_": "pt-br",
+    "af_": "en-us",
+    "am_": "en-us",
+    "bf_": "en-gb",
+    "bm_": "en-gb",
+    "ef_": "es",
+    "em_": "es",
+    "ff_": "fr-fr",
+    "fm_": "fr-fr",
+    "hf_": "hi",
+    "hm_": "hi",
+    "if_": "it",
+    "im_": "it",
+    "pf_": "pt-br",
+    "pm_": "pt-br",
 }
 
 DEFAULT_VOICE = "af_heart"
@@ -70,9 +76,7 @@ _PUNCT_SPLIT = re.compile(r"([.,!?;])")
 
 
 class KokoroNvidiaBackend:
-    def __init__(
-        self, model_id: str, repo: str, model_path: Path, device: str
-    ) -> None:
+    def __init__(self, model_id: str, repo: str, model_path: Path, device: str) -> None:
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -155,9 +159,7 @@ class KokoroNvidiaBackend:
                 )
 
         self._vocab = _parse_tokens(tokens_path)
-        self._voice_index, self._voices_array = _load_voices(
-            voices_bin, voices_txt
-        )
+        self._voice_index, self._voices_array = _load_voices(voices_bin, voices_txt)
         del np  # noqa: F841 — numpy imported above for early failure surface
 
         providers = _select_providers(self._device, ort)
@@ -195,15 +197,11 @@ class KokoroNvidiaBackend:
             )
         await self.get_model()
         async with self._lock:
-            result = await asyncio.to_thread(
-                self._synthesize_sync, text, voice, speed
-            )
+            result = await asyncio.to_thread(self._synthesize_sync, text, voice, speed)
             self._last_used = time.monotonic()
             return result
 
-    def _synthesize_sync(
-        self, text: str, voice: str, speed: float
-    ) -> SynthesisResult:
+    def _synthesize_sync(self, text: str, voice: str, speed: float) -> SynthesisResult:
         import numpy as np
 
         assert self._voice_index is not None
@@ -227,9 +225,7 @@ class KokoroNvidiaBackend:
             # Kokoro's style vector is indexed by the (pre-pad) token
             # count — same convention as kokoro-onnx upstream.
             style = self._voices_array[voice_idx, n_tokens]
-            padded = np.asarray(
-                [[0, *token_ids, 0]], dtype=np.int64
-            )
+            padded = np.asarray([[0, *token_ids, 0]], dtype=np.int64)
             style_in = np.asarray(style, dtype=np.float32).reshape(1, VOICE_DIM)
             speed_in = np.asarray([speed], dtype=np.float32)
             audio = self._session.run(
@@ -300,17 +296,13 @@ def _parse_tokens(path: Path) -> dict[str, int]:
         try:
             vocab[head] = int(tail)
         except ValueError as exc:
-            raise ValueError(
-                f"malformed tokens.txt line {line!r}"
-            ) from exc
+            raise ValueError(f"malformed tokens.txt line {line!r}") from exc
     if not vocab:
         raise ValueError(f"no tokens parsed from {path}")
     return vocab
 
 
-def _load_voices(
-    voices_bin: Path, voices_txt: Path
-) -> tuple[dict[str, int], Any]:
+def _load_voices(voices_bin: Path, voices_txt: Path) -> tuple[dict[str, int], Any]:
     """Read raw f32 voices.bin + index → (name→row, ndarray[N,510,256])."""
     import numpy as np
 
@@ -323,9 +315,7 @@ def _load_voices(
         try:
             idx = int(idx_s)
         except ValueError as exc:
-            raise ValueError(
-                f"malformed voices.txt line {line!r}"
-            ) from exc
+            raise ValueError(f"malformed voices.txt line {line!r}") from exc
         name = name.strip()
         if name:
             index[name] = idx

@@ -22,9 +22,7 @@ from .base import TranscribeResult
 
 
 class MultitaskBackend:
-    def __init__(
-        self, model_id: str, repo: str, model_path: Path, device: str
-    ) -> None:
+    def __init__(self, model_id: str, repo: str, model_path: Path, device: str) -> None:
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -58,9 +56,7 @@ class MultitaskBackend:
 
         nemo_path = find_nemo_file(self.model_path)
         self._log.info("loading %s from %s", self.model_id, nemo_path)
-        model = EncDecMultiTaskModel.restore_from(
-            nemo_path, map_location="cpu"
-        )
+        model = EncDecMultiTaskModel.restore_from(nemo_path, map_location="cpu")
         model = model.to(self._device).eval()
         return model
 
@@ -118,7 +114,10 @@ class MultitaskBackend:
         )
         if not chunks:
             return TranscribeResult(
-                text="", language=source_lang, duration=duration, supports_timestamps=True
+                text="",
+                language=source_lang,
+                duration=duration,
+                supports_timestamps=True,
             )
 
         self._log.info(

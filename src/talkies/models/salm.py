@@ -28,14 +28,11 @@ from .. import config
 from .. import vad as vad_mod
 from .base import TranscribeResult
 
-
 _PROMPT_PREFIX = "Transcribe the following:"
 
 
 class SalmBackend:
-    def __init__(
-        self, model_id: str, repo: str, model_path: Path, device: str
-    ) -> None:
+    def __init__(self, model_id: str, repo: str, model_path: Path, device: str) -> None:
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -66,7 +63,6 @@ class SalmBackend:
 
     def _load_sync(self) -> Any:
         import torch
-
         from nemo.collections.speechlm2.models import SALM
         from nemo.collections.speechlm2.models import salm as _salm_mod
 
@@ -102,14 +98,10 @@ class SalmBackend:
                 dtype=dtype,
             )
 
-        self._log.info(
-            "loading SALM %s from %s", self.model_id, self.model_path
-        )
+        self._log.info("loading SALM %s from %s", self.model_id, self.model_path)
         _salm_mod.load_pretrained_hf = _bf16_load
         try:
-            model = SALM.from_pretrained(
-                str(self.model_path), map_location="cpu"
-            )
+            model = SALM.from_pretrained(str(self.model_path), map_location="cpu")
         finally:
             _salm_mod.load_pretrained_hf = _orig
         model = model.to(self._device).eval()

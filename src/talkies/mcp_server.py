@@ -31,8 +31,8 @@ from typing import Any, Awaitable, Callable
 
 from mcp.server.fastmcp import FastMCP
 
-from . import config, files as files_mod
-
+from . import config
+from . import files as files_mod
 
 _log = logging.getLogger("talkies.mcp")
 
@@ -187,8 +187,7 @@ def build_mcp_server(
             raise ValueError(f"content_base64 is not valid base64: {exc}") from exc
         if len(data) > config.MAX_UPLOAD_BYTES:
             raise ValueError(
-                f"upload too large ({len(data)} bytes > "
-                f"{config.MAX_UPLOAD_BYTES})"
+                f"upload too large ({len(data)} bytes > " f"{config.MAX_UPLOAD_BYTES})"
             )
         try:
             rel = files_mod.sanitize_path(path)

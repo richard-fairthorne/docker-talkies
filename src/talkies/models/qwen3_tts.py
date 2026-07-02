@@ -38,7 +38,6 @@ from typing import Any
 from .. import config
 from .base import SynthesisResult
 
-
 DEFAULT_LANGUAGE = "English"
 
 # Sibling-file conventions next to ``<name>.wav`` for ``base`` mode.
@@ -85,9 +84,7 @@ class Qwen3TTSBackend:
         default_language: str = DEFAULT_LANGUAGE,
     ) -> None:
         if mode not in _VALID_MODES:
-            raise ValueError(
-                f"qwen3_tts mode={mode!r} must be one of {_VALID_MODES}"
-            )
+            raise ValueError(f"qwen3_tts mode={mode!r} must be one of {_VALID_MODES}")
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -150,7 +147,9 @@ class Qwen3TTSBackend:
             if custom_resolved is not None and resolved.is_relative_to(custom_resolved):
                 out[name] = "custom"
                 continue
-            if builtin_resolved is not None and resolved.is_relative_to(builtin_resolved):
+            if builtin_resolved is not None and resolved.is_relative_to(
+                builtin_resolved
+            ):
                 out[name] = "builtin"
                 continue
             out[name] = "builtin"
@@ -228,9 +227,7 @@ class Qwen3TTSBackend:
                 "loading %s (mode=%s) onto %s", self.repo, self._mode, self._device
             )
             self._model = await asyncio.to_thread(self._load_sync)
-            loaded_type = getattr(
-                getattr(self._model, "model", None), "model", None
-            )
+            loaded_type = getattr(getattr(self._model, "model", None), "model", None)
             loaded_type = getattr(loaded_type, "tts_model_type", None)
             if loaded_type is not None and loaded_type != self._mode:
                 self._log.warning(
@@ -253,9 +250,7 @@ class Qwen3TTSBackend:
                 f"{self.model_id!r} via TALKIES_ENABLED_MODELS."
             )
         if not self.model_path.is_dir():
-            raise FileNotFoundError(
-                f"qwen3-tts snapshot missing at {self.model_path}"
-            )
+            raise FileNotFoundError(f"qwen3-tts snapshot missing at {self.model_path}")
         return FasterQwen3TTS.from_pretrained(
             str(self.model_path),
             device=self._device,
@@ -298,7 +293,12 @@ class Qwen3TTSBackend:
             async with self._lock:
                 result = await asyncio.to_thread(
                     self._synthesize_base_sync,
-                    model, text, cfg, instructions, lang, sampling,
+                    model,
+                    text,
+                    cfg,
+                    instructions,
+                    lang,
+                    sampling,
                 )
                 self._last_used = time.monotonic()
                 return result
@@ -313,7 +313,12 @@ class Qwen3TTSBackend:
             async with self._lock:
                 result = await asyncio.to_thread(
                     self._synthesize_custom_sync,
-                    model, text, voice, lang, instructions, sampling,
+                    model,
+                    text,
+                    voice,
+                    lang,
+                    instructions,
+                    sampling,
                 )
                 self._last_used = time.monotonic()
                 return result
@@ -329,7 +334,11 @@ class Qwen3TTSBackend:
         async with self._lock:
             result = await asyncio.to_thread(
                 self._synthesize_design_sync,
-                model, text, instructions, lang, sampling,
+                model,
+                text,
+                instructions,
+                lang,
+                sampling,
             )
             self._last_used = time.monotonic()
             return result

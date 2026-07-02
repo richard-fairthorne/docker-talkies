@@ -109,3 +109,7 @@ tests/integration/.fixtures/*
 !tests/integration/.fixtures/audio.mp3.txt
 /.e2e-cache
 .claude
+.telemetry/
+
+# Test plan scratch — per-run, never committed
+.testing/

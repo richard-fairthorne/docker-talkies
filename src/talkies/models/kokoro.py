@@ -24,7 +24,6 @@ from typing import Any
 
 from .base import SynthesisResult
 
-
 SAMPLE_RATE = 24000
 
 # Voice name prefixes we expose. Each voice file in the snapshot's
@@ -32,22 +31,27 @@ SAMPLE_RATE = 24000
 # is the misaki lang_code, the second is f/m. We allowlist lang codes that
 # need no extras beyond the base image's misaki[en] + espeak-ng install.
 SUPPORTED_VOICE_PREFIXES = (
-    "af_", "am_",   # a — American English (misaki[en])
-    "bf_", "bm_",   # b — British English  (misaki[en])
-    "ef_", "em_",   # e — Spanish          (espeak-ng)
-    "ff_", "fm_",   # f — French           (espeak-ng)
-    "hf_", "hm_",   # h — Hindi            (espeak-ng)
-    "if_", "im_",   # i — Italian          (espeak-ng)
-    "pf_", "pm_",   # p — Portuguese       (espeak-ng)
+    "af_",
+    "am_",  # a — American English (misaki[en])
+    "bf_",
+    "bm_",  # b — British English  (misaki[en])
+    "ef_",
+    "em_",  # e — Spanish          (espeak-ng)
+    "ff_",
+    "fm_",  # f — French           (espeak-ng)
+    "hf_",
+    "hm_",  # h — Hindi            (espeak-ng)
+    "if_",
+    "im_",  # i — Italian          (espeak-ng)
+    "pf_",
+    "pm_",  # p — Portuguese       (espeak-ng)
 )
 
 DEFAULT_VOICE = "af_heart"
 
 
 class KokoroBackend:
-    def __init__(
-        self, model_id: str, repo: str, model_path: Path, device: str
-    ) -> None:
+    def __init__(self, model_id: str, repo: str, model_path: Path, device: str) -> None:
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -112,19 +116,19 @@ class KokoroBackend:
         config_path = self.model_path / "config.json"
         weights_path = self.model_path / "kokoro-v1_0.pth"
         if not config_path.is_file():
-            raise FileNotFoundError(
-                f"kokoro config.json missing at {config_path}"
-            )
+            raise FileNotFoundError(f"kokoro config.json missing at {config_path}")
         if not weights_path.is_file():
-            raise FileNotFoundError(
-                f"kokoro weights missing at {weights_path}"
-            )
+            raise FileNotFoundError(f"kokoro weights missing at {weights_path}")
         device = "cuda" if self._device.startswith("cuda") else "cpu"
-        model = KModel(
-            repo_id=self.repo,
-            config=str(config_path),
-            model=str(weights_path),
-        ).to(device).eval()
+        model = (
+            KModel(
+                repo_id=self.repo,
+                config=str(config_path),
+                model=str(weights_path),
+            )
+            .to(device)
+            .eval()
+        )
         return model
 
     def _get_or_create_pipeline(self, lang_code: str, model: Any) -> Any:
@@ -154,9 +158,7 @@ class KokoroBackend:
 
         voice_path = self.model_path / "voices" / f"{voice}.pt"
         if not voice_path.is_file():
-            raise FileNotFoundError(
-                f"voice pack missing at {voice_path}"
-            )
+            raise FileNotFoundError(f"voice pack missing at {voice_path}")
         pack = torch.load(str(voice_path), weights_only=True)
         pipeline.voices[voice] = pack
 

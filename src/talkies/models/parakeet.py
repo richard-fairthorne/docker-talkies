@@ -26,9 +26,7 @@ from .base import TranscribeResult
 
 
 class ParakeetBackend:
-    def __init__(
-        self, model_id: str, repo: str, model_path: Path, device: str
-    ) -> None:
+    def __init__(self, model_id: str, repo: str, model_path: Path, device: str) -> None:
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -123,7 +121,10 @@ class ParakeetBackend:
             )
 
         self._log.info(
-            "vad chunked %.1fs into %d region(s) for %s", duration, len(chunks), self.model_id
+            "vad chunked %.1fs into %d region(s) for %s",
+            duration,
+            len(chunks),
+            self.model_id,
         )
 
         tmpdir = tempfile.mkdtemp(prefix="talkies-parakeet-")

@@ -80,9 +80,7 @@ MODELS_FILE: Path = Path(
     os.environ.get("TALKIES_MODELS_FILE", "/app/models.json")
 ).resolve()
 
-DATA_DIR: Path = Path(
-    os.environ.get("TALKIES_DATA_DIR", "/data")
-).resolve()
+DATA_DIR: Path = Path(os.environ.get("TALKIES_DATA_DIR", "/data")).resolve()
 
 # Flat per-model snapshot directory: each enabled model gets
 # DATA_DIR / models / <slug> / ... — populated by entrypoint.sh via
@@ -121,9 +119,9 @@ MAX_DOWNLOAD_BYTES: int = _int_env("TALKIES_MAX_DOWNLOAD_BYTES", 1024 * 1024 * 1
 # SSRF guard for URL downloads. Default off (LAN-fetch use cases dominate
 # in self-hosted deployments). Set to true to refuse URLs whose hostname
 # resolves to private / loopback / link-local / multicast / metadata IPs.
-_BLOCK_PRIVATE_RAW: str = os.environ.get(
-    "TALKIES_BLOCK_PRIVATE_DOWNLOADS", "false"
-).strip().lower()
+_BLOCK_PRIVATE_RAW: str = (
+    os.environ.get("TALKIES_BLOCK_PRIVATE_DOWNLOADS", "false").strip().lower()
+)
 if _BLOCK_PRIVATE_RAW not in ("", "true", "false", "1", "0", "yes", "no"):
     raise ValueError(
         f"TALKIES_BLOCK_PRIVATE_DOWNLOADS={_BLOCK_PRIVATE_RAW!r} must be "
@@ -150,6 +148,20 @@ VAD_THRESHOLD: float = _float_env("TALKIES_VAD_THRESHOLD", 0.5)
 QWEN3_STREAM_CHUNK_SIZE: int = _int_env("TALKIES_QWEN3_STREAM_CHUNK_SIZE", 8)
 
 
+# Executors a models.json entry may declare. Single source of truth for the
+# registry validator + the "must be one of" error message.
+VALID_EXECUTORS = (
+    "whisper",
+    "parakeet",
+    "parakeet_cpp",
+    "canary_multitask",
+    "canary_salm",
+    "kokoro",
+    "kokoro_nvidia",
+    "qwen3_tts",
+)
+
+
 def load_registry() -> dict[str, dict]:
     """Read models.json and return {model_id: {repo, executor, language?, ...}}."""
     if not MODELS_FILE.exists():
@@ -163,24 +175,16 @@ def load_registry() -> dict[str, dict]:
         raise ValueError(f"{MODELS_FILE}: 'models' must be a non-empty object")
     for model_id, entry in models.items():
         if not isinstance(entry, dict):
-            raise ValueError(f"{MODELS_FILE}: model {model_id!r} entry must be an object")
+            raise ValueError(
+                f"{MODELS_FILE}: model {model_id!r} entry must be an object"
+            )
         if "repo" not in entry:
             raise ValueError(f"{MODELS_FILE}: model {model_id!r} missing 'repo'")
         executor = entry.get("executor", "whisper")
-        if executor not in (
-            "whisper",
-            "parakeet",
-            "parakeet_cpp",
-            "canary_multitask",
-            "canary_salm",
-            "kokoro",
-            "kokoro_nvidia",
-            "qwen3_tts",
-        ):
+        if executor not in VALID_EXECUTORS:
             raise ValueError(
-                f"{MODELS_FILE}: model {model_id!r} executor={executor!r} must be one of "
-                "'whisper', 'parakeet', 'parakeet_cpp', 'canary_multitask', 'canary_salm', "
-                "'kokoro', 'kokoro_nvidia', 'qwen3_tts'"
+                f"{MODELS_FILE}: model {model_id!r} executor={executor!r} "
+                f"must be one of {VALID_EXECUTORS}"
             )
     if ENABLED_MODELS:
         missing = [s for s in ENABLED_MODELS if s not in models]

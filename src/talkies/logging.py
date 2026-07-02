@@ -14,10 +14,29 @@ import sys
 from datetime import datetime, timezone
 
 _RESERVED = {
-    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-    "created", "msecs", "relativeCreated", "thread", "threadName",
-    "processName", "process", "taskName", "message", "asctime",
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "taskName",
+    "message",
+    "asctime",
 }
 
 
@@ -48,17 +67,38 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+# Accepted level names → stdlib numeric level. The user-facing set is
+# debug / info / warn / error / fatal; `warning` and `critical` are also
+# accepted so the stdlib canonical names work too.
+_LEVEL_ALIASES = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARN": logging.WARNING,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "FATAL": logging.CRITICAL,
+    "CRITICAL": logging.CRITICAL,
+}
+_DEFAULT_LEVEL_NAME = "INFO"
+_USER_FACING_LEVELS = ("debug", "info", "warn", "error", "fatal")
+
+
 def _resolve_level() -> int:
     raw = (
-        os.environ.get("TALKIES_LOG_LEVEL")
-        or os.environ.get("LOG_LEVEL")
-        or "INFO"
-    ).strip().upper()
-    if raw == "FATAL":
-        raw = "CRITICAL"
-    if raw == "WARN":
-        raw = "WARNING"
-    return getattr(logging, raw, logging.INFO)
+        (
+            os.environ.get("TALKIES_LOG_LEVEL")
+            or os.environ.get("LOG_LEVEL")
+            or _DEFAULT_LEVEL_NAME
+        )
+        .strip()
+        .upper()
+    )
+    if raw not in _LEVEL_ALIASES:
+        raise ValueError(
+            f"TALKIES_LOG_LEVEL={raw!r} is not a valid level; "
+            f"choose one of {_USER_FACING_LEVELS}"
+        )
+    return _LEVEL_ALIASES[raw]
 
 
 def configure() -> None:
@@ -77,3 +117,13 @@ def configure() -> None:
     if level > logging.DEBUG:
         for name in ("urllib3", "huggingface_hub", "filelock", "asyncio"):
             logging.getLogger(name).setLevel(logging.WARNING)
+    else:
+        # DEBUG logs FULL request + response content at the HTTP boundary —
+        # TTS input text / instructions, cloned-voice reference transcripts,
+        # ASR transcripts. That's PII. Warn loudly so nobody ships DEBUG to
+        # production and discovers user speech in their log aggregator.
+        logging.getLogger("talkies.logging").warning(
+            "DEBUG level active — request/response BODIES (incl. transcripts "
+            "+ TTS input text) are logged in full. This exposes PII. Do not "
+            "run DEBUG in production.",
+        )

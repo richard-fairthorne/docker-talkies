@@ -137,11 +137,20 @@ harness_start() {
     echo "          cache:  ${HARNESS_CACHE_DIR}"
     echo "          models: ${HARNESS_ENABLED_MODELS}"
 
+    # Forward the log level into the container when the caller sets it, so
+    # DEBUG body-logging can be exercised from a test / smoke run. Defaults
+    # to the image's own default (info) when unset.
+    local log_level_env=()
+    if [ -n "${TALKIES_LOG_LEVEL:-}" ]; then
+        log_level_env=(-e "TALKIES_LOG_LEVEL=${TALKIES_LOG_LEVEL}")
+    fi
+
     docker run -d --rm --gpus all \
         --name "$HARNESS_CONTAINER" \
         -v "${HARNESS_CACHE_DIR}:/data" \
         -e TALKIES_DEVICE=cuda \
         -e TALKIES_ENABLED_MODELS="${HARNESS_ENABLED_MODELS}" \
+        "${log_level_env[@]}" \
         -p "${HARNESS_PORT}:8000" \
         "$HARNESS_IMAGE" >/dev/null
 

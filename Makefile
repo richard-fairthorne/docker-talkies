@@ -122,7 +122,7 @@ run-cuda: build-cuda ## Run CUDA image locally (requires --gpus all support)
 test: test-unit ## Run unit tests (fast, offline, no GPU)
 
 test-unit: dev-image ## Run unit tests in the dev container
-	$(DEV_RUN) pytest tests/test_config.py -v
+	$(DEV_RUN) pytest tests/test_config.py tests/test_logging.py -v
 
 # Integration suite — needs a real CUDA host. Runs on the host (NOT inside
 # the dev container) because it spawns sibling docker containers and pokes

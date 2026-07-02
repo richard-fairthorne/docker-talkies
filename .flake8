@@ -1,0 +1,9 @@
+[flake8]
+# Align to black's line length (project formats with black, which defaults
+# to 88). Without this, flake8 uses its 79 default and disagrees with the
+# formatter on every wrapped line.
+max-line-length = 88
+# E203 (whitespace before ':') and W503 (line break before binary operator)
+# are black-compatible slices flake8 flags but black produces — ignore per
+# the black/flake8 interop guidance.
+extend-ignore = E203, W503

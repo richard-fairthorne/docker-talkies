@@ -21,22 +21,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote
 
-import mimetypes
-
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from starlette.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import config, downloads as downloads_mod, files as files_mod, tts as tts_mod
-from .audio import AudioConversionError, NotStereoError, to_wav_16k_mono, to_wav_16k_split_lr
+from . import config
+from . import downloads as downloads_mod
+from . import files as files_mod
+from . import tts as tts_mod
+from .audio import (
+    AudioConversionError,
+    NotStereoError,
+    to_wav_16k_mono,
+    to_wav_16k_split_lr,
+)
 from .auth import BearerAuthMiddleware
 from .logging import configure as configure_logging
 from .mcp_server import build_mcp_server
@@ -60,6 +67,7 @@ async def _wait_for_gpu_drain() -> None:
     when the device is already idle (microseconds); the right barrier
     otherwise. Importing torch lazily so non-CUDA images stay light.
     """
+
     def _sync() -> None:
         try:
             import torch
@@ -199,9 +207,7 @@ class _MCPSlashRewriteMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(
-        self, scope: Scope, receive: Receive, send: Send
-    ) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") == "http" and scope.get("path") == "/v1/mcp":
             scope = dict(scope)
             scope["path"] = "/v1/mcp/"
@@ -305,9 +311,7 @@ async def unload_one(model_id: str) -> JSONResponse:
     decoded = unquote(model_id)
     backend = BACKENDS.get(decoded)
     if backend is None:
-        return JSONResponse(
-            {"detail": f"unknown model {decoded!r}"}, status_code=404
-        )
+        return JSONResponse({"detail": f"unknown model {decoded!r}"}, status_code=404)
     if not backend.loaded():
         return JSONResponse({"detail": "not loaded"}, status_code=404)
     await backend.unload()
@@ -397,6 +401,33 @@ class SpeechRequest(BaseModel):
 @app.post("/v1/audio/speech")
 async def speech(body: SpeechRequest) -> Response:
     model = body.model
+    if log.isEnabledFor(logging.DEBUG):
+        # Full request body — DEBUG only, PII-bearing (input text +
+        # instructions). Logged before validation so rejected requests are
+        # captured too. `input_len` stays visible at higher levels' mental
+        # model; the raw text is DEBUG-gated.
+        log.debug(
+            "tts request",
+            extra={
+                "endpoint": "/v1/audio/speech",
+                "req_model": model,
+                "req_voice": body.voice,
+                "req_response_format": body.response_format,
+                "req_speed": body.speed,
+                "req_language": body.language,
+                "req_instructions": body.instructions,
+                "req_sampling": {
+                    "temperature": body.temperature,
+                    "top_k": body.top_k,
+                    "top_p": body.top_p,
+                    "repetition_penalty": body.repetition_penalty,
+                    "max_new_tokens": body.max_new_tokens,
+                    "do_sample": body.do_sample,
+                },
+                "input_len": len(body.input),
+                "input_text": body.input,
+            },
+        )
     if model not in BACKENDS:
         raise HTTPException(
             status_code=404,
@@ -442,9 +473,7 @@ async def speech(body: SpeechRequest) -> Response:
         raise HTTPException(status_code=400, detail="input text is empty")
 
     # Sibling eviction — TTS competes with ASR for the same VRAM/RAM pool.
-    siblings = [
-        (mid, b) for mid, b in BACKENDS.items() if mid != model and b.loaded()
-    ]
+    siblings = [(mid, b) for mid, b in BACKENDS.items() if mid != model and b.loaded()]
     if siblings:
         log.info(
             "evicting %d sibling backend(s) before loading %s (tts): %s",
@@ -452,9 +481,7 @@ async def speech(body: SpeechRequest) -> Response:
             model,
             [mid for mid, _ in siblings],
         )
-        await asyncio.gather(
-            *(b.unload() for _, b in siblings), return_exceptions=True
-        )
+        await asyncio.gather(*(b.unload() for _, b in siblings), return_exceptions=True)
         await _wait_for_gpu_drain()
 
     # PCM streaming path — only when the backend natively supports it
@@ -479,10 +506,21 @@ async def speech(body: SpeechRequest) -> Response:
 
     if fmt == "pcm" and hasattr(backend, "synthesize_stream"):
         chunk_size = config.QWEN3_STREAM_CHUNK_SIZE
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "tts stream start",
+                extra={
+                    "resp_model": model,
+                    "resp_voice": voice,
+                    "resp_format": fmt,
+                    "resp_sample_rate": backend.sample_rate,  # type: ignore[union-attr]
+                    "chunk_size": chunk_size,
+                },
+            )
 
         async def _pcm_stream() -> AsyncIterator[bytes]:
             try:
-                async for chunk in backend.synthesize_stream(  # type: ignore[union-attr]
+                async for chunk in backend.synthesize_stream(  # type: ignore
                     body.input,
                     voice=voice,
                     speed=speed,
@@ -499,7 +537,7 @@ async def speech(body: SpeechRequest) -> Response:
         return StreamingResponse(
             _pcm_stream(),
             media_type="application/octet-stream",
-            headers={"X-Sample-Rate": str(backend.sample_rate)},  # type: ignore[union-attr]
+            headers={"X-Sample-Rate": str(backend.sample_rate)},  # type: ignore
         )
 
     try:
@@ -523,6 +561,18 @@ async def speech(body: SpeechRequest) -> Response:
     except tts_mod.TTSEncodingError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "tts response",
+            extra={
+                "resp_model": model,
+                "resp_voice": voice,
+                "resp_format": fmt,
+                "resp_sample_rate": synth.sample_rate,
+                "resp_bytes": len(audio_bytes),
+                "resp_content_type": content_type,
+            },
+        )
     return Response(content=audio_bytes, media_type=content_type)
 
 
@@ -540,6 +590,22 @@ async def transcribe(
     ),
     diarization: str | None = Form(default=None),
 ) -> Any:
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "asr request",
+            extra={
+                "endpoint": "/v1/audio/transcriptions",
+                "req_model": model,
+                "req_language": language,
+                "req_response_format": response_format,
+                "req_diarization": diarization,
+                "req_timestamp_granularities": timestamp_granularities,
+                "req_prompt": prompt,
+                "req_temperature": temperature,
+                "req_has_upload": file is not None and (file.filename or "") != "",
+                "req_file_path": file_path,
+            },
+        )
     del prompt, temperature  # accepted for OpenAI compatibility, not used
 
     has_upload = file is not None and (file.filename or "") != ""
@@ -548,7 +614,7 @@ async def transcribe(
         raise HTTPException(
             status_code=400,
             detail="must specify exactly one of `file` (multipart upload) "
-                   "or `file_path` (path under /v1/files)",
+            "or `file_path` (path under /v1/files)",
         )
 
     if model not in BACKENDS:
@@ -570,7 +636,10 @@ async def transcribe(
         if len(raw) > config.MAX_UPLOAD_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"upload too large ({len(raw)} bytes > {config.MAX_UPLOAD_BYTES})",
+                detail=(
+                    f"upload too large ({len(raw)} bytes "
+                    f"> {config.MAX_UPLOAD_BYTES})"
+                ),
             )
         original_name = file.filename or "audio"
     else:
@@ -605,6 +674,18 @@ async def transcribe(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     fmt = (response_format or "json").lower()
+    if log.isEnabledFor(logging.DEBUG):
+        transcript = payload.get("text") if isinstance(payload, dict) else payload
+        log.debug(
+            "asr transcript",
+            extra={
+                "resp_model": model,
+                "resp_format": fmt,
+                "resp_source": original_name,
+                "resp_bytes": len(raw),
+                "transcript": transcript,
+            },
+        )
     return _wrap_payload(payload, fmt=fmt)
 
 
@@ -649,9 +730,7 @@ async def run_transcription_pipeline(
 
     # Evict sibling backends — all talkies models compete for the same
     # GPU/RAM, so loading a new one while another is resident risks OOM.
-    siblings = [
-        (mid, b) for mid, b in BACKENDS.items() if mid != model and b.loaded()
-    ]
+    siblings = [(mid, b) for mid, b in BACKENDS.items() if mid != model and b.loaded()]
     if siblings:
         log.info(
             "evicting %d sibling backend(s) before loading %s: %s",
@@ -659,9 +738,7 @@ async def run_transcription_pipeline(
             model,
             [mid for mid, _ in siblings],
         )
-        await asyncio.gather(
-            *(b.unload() for _, b in siblings), return_exceptions=True
-        )
+        await asyncio.gather(*(b.unload() for _, b in siblings), return_exceptions=True)
         await _wait_for_gpu_drain()
 
     if do_diarize:
@@ -832,7 +909,9 @@ def _tag_channel(items: list[dict], channel: str) -> list[dict]:
     return out
 
 
-def _merge_lr_results(l_res: TranscribeResult, r_res: TranscribeResult) -> TranscribeResult:
+def _merge_lr_results(
+    l_res: TranscribeResult, r_res: TranscribeResult
+) -> TranscribeResult:
     """Combine left+right per-channel results into one diarized TranscribeResult.
 
     Segments and words are tagged with channel ("L"/"R") and merged by start
@@ -843,14 +922,18 @@ def _merge_lr_results(l_res: TranscribeResult, r_res: TranscribeResult) -> Trans
     """
     l_segs = _tag_channel(list(l_res.segments), "L")
     r_segs = _tag_channel(list(r_res.segments), "R")
-    merged_segs = sorted(l_segs + r_segs, key=lambda s: (float(s.get("start") or 0), s["channel"]))
+    merged_segs = sorted(
+        l_segs + r_segs, key=lambda s: (float(s.get("start") or 0), s["channel"])
+    )
     # Re-id after merge so downstream consumers see contiguous ids.
     for idx, seg in enumerate(merged_segs):
         seg["id"] = idx
 
     l_words = _tag_channel(list(l_res.words), "L")
     r_words = _tag_channel(list(r_res.words), "R")
-    merged_words = sorted(l_words + r_words, key=lambda w: (float(w.get("start") or 0), w["channel"]))
+    merged_words = sorted(
+        l_words + r_words, key=lambda w: (float(w.get("start") or 0), w["channel"])
+    )
 
     if merged_segs:
         # Plain-text / json output collapses consecutive same-channel segments
@@ -1005,7 +1088,8 @@ def _segments_to_srt(segments: list[dict], *, diarized: bool = False) -> str:
     for idx, seg in enumerate(segments, start=1):
         lines.append(str(idx))
         lines.append(
-            f"{_format_srt_timestamp(seg['start'])} --> {_format_srt_timestamp(seg['end'])}"
+            f"{_format_srt_timestamp(seg['start'])} --> "
+            f"{_format_srt_timestamp(seg['end'])}"
         )
         lines.append(_seg_text(seg, diarized=diarized))
         lines.append("")
@@ -1016,7 +1100,8 @@ def _segments_to_vtt(segments: list[dict], *, diarized: bool = False) -> str:
     lines: list[str] = ["WEBVTT", ""]
     for seg in segments:
         lines.append(
-            f"{_format_vtt_timestamp(seg['start'])} --> {_format_vtt_timestamp(seg['end'])}"
+            f"{_format_vtt_timestamp(seg['start'])} --> "
+            f"{_format_vtt_timestamp(seg['end'])}"
         )
         lines.append(_seg_text(seg, diarized=diarized))
         lines.append("")

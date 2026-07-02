@@ -23,11 +23,11 @@ class TTSEncodingError(Exception):
 # ``-f ogg`` is the standard opus container.
 # ``-f adts`` is raw AAC frames (matches OpenAI's ``aac`` shape).
 _FORMATS: dict[str, tuple[list[str], str]] = {
-    "mp3":  (["-f", "mp3", "-acodec", "libmp3lame", "-b:a", "128k"], "audio/mpeg"),
+    "mp3": (["-f", "mp3", "-acodec", "libmp3lame", "-b:a", "128k"], "audio/mpeg"),
     "opus": (["-f", "ogg", "-acodec", "libopus", "-b:a", "64k"], "audio/ogg"),
-    "aac":  (["-f", "adts", "-acodec", "aac", "-b:a", "128k"], "audio/aac"),
+    "aac": (["-f", "adts", "-acodec", "aac", "-b:a", "128k"], "audio/aac"),
     "flac": (["-f", "flac", "-acodec", "flac"], "audio/flac"),
-    "wav":  (["-f", "wav", "-acodec", "pcm_s16le"], "audio/wav"),
+    "wav": (["-f", "wav", "-acodec", "pcm_s16le"], "audio/wav"),
 }
 
 SUPPORTED_FORMATS: tuple[str, ...] = (*_FORMATS.keys(), "pcm")
@@ -64,12 +64,17 @@ async def encode_audio(
     cmd = [
         "ffmpeg",
         "-hide_banner",
-        "-loglevel", "error",
+        "-loglevel",
+        "error",
         "-y",
-        "-f", "s16le",
-        "-ar", str(sample_rate),
-        "-ac", "1",
-        "-i", "pipe:0",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
         *args,
         "pipe:1",
     ]

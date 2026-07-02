@@ -138,7 +138,9 @@ def detect_speech_regions(
     probs = _SileroVAD.get().probabilities(audio)
     speech_mask = probs >= threshold
 
-    min_silence_windows = max(1, (min_silence_ms * SAMPLE_RATE) // (1000 * _WINDOW_SIZE_SAMPLES))
+    min_silence_windows = max(
+        1, (min_silence_ms * SAMPLE_RATE) // (1000 * _WINDOW_SIZE_SAMPLES)
+    )
     pad_samples = (speech_pad_ms * SAMPLE_RATE) // 1000
 
     regions: list[SpeechRegion] = []
@@ -160,7 +162,9 @@ def detect_speech_regions(
             if silence_run < min_silence_windows:
                 continue
             region_end = sample_pos - silence_run * _WINDOW_SIZE_SAMPLES
-            regions.append(_pad_clip(region_start, region_end, audio.shape[0], pad_samples))
+            regions.append(
+                _pad_clip(region_start, region_end, audio.shape[0], pad_samples)
+            )
             in_speech = False
             silence_run = 0
 
@@ -254,7 +258,13 @@ def offset_segments(segments: list[dict], offset_seconds: float) -> list[dict]:
     """Return a copy of `segments` with start/end shifted by `offset_seconds`."""
     out: list[dict] = []
     for s in _validate_segments(segments):
-        out.append({**s, "start": float(s["start"]) + offset_seconds, "end": float(s["end"]) + offset_seconds})
+        out.append(
+            {
+                **s,
+                "start": float(s["start"]) + offset_seconds,
+                "end": float(s["end"]) + offset_seconds,
+            }
+        )
     return out
 
 
@@ -263,11 +273,19 @@ def offset_words(words: list[dict], offset_seconds: float) -> list[dict]:
     for w in words:
         if not isinstance(w, dict) or "start" not in w or "end" not in w:
             continue
-        out.append({**w, "start": float(w["start"]) + offset_seconds, "end": float(w["end"]) + offset_seconds})
+        out.append(
+            {
+                **w,
+                "start": float(w["start"]) + offset_seconds,
+                "end": float(w["end"]) + offset_seconds,
+            }
+        )
     return out
 
 
-def stitch_results(parts: list[tuple[float, Any]]) -> tuple[str, list[dict], list[dict]]:
+def stitch_results(
+    parts: list[tuple[float, Any]],
+) -> tuple[str, list[dict], list[dict]]:
     """Combine per-chunk (offset_seconds, TranscribeResult) into one transcript.
 
     Returns (combined_text, combined_segments, combined_words). Segments are

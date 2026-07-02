@@ -28,7 +28,6 @@ def find_nemo_file(model_path: Path) -> str:
     if len(matches) > 1:
         names = [p.name for p in matches]
         raise RuntimeError(
-            f"multiple .nemo files in {model_path}: {names} — "
-            "expected exactly one"
+            f"multiple .nemo files in {model_path}: {names} — " "expected exactly one"
         )
     return str(matches[0])

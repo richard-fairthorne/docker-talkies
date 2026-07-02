@@ -43,7 +43,6 @@ import httpx
 
 from . import config
 
-
 _DOWNLOADS_SUBDIR = "downloads"
 _HASH_LEN = 16
 _MAX_REDIRECTS = 5
@@ -91,7 +90,9 @@ def _safe_basename(url: str) -> str:
 
 
 def cache_path_for(url: str) -> Path:
-    return config.FILES_DIR / _DOWNLOADS_SUBDIR / f"{_hash_url(url)}-{_safe_basename(url)}"
+    return (
+        config.FILES_DIR / _DOWNLOADS_SUBDIR / f"{_hash_url(url)}-{_safe_basename(url)}"
+    )
 
 
 def cache_relpath_for(url: str) -> str:
@@ -121,7 +122,9 @@ def _check_ssrf(host: str) -> None:
         if not addr_str:
             continue
         if family == socket.AF_INET:
-            ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv4Address(addr_str)
+            ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv4Address(
+                addr_str
+            )
         elif family == socket.AF_INET6:
             # strip scope id if present ("fe80::1%eth0" → "fe80::1")
             ip = ipaddress.IPv6Address(addr_str.split("%", 1)[0])

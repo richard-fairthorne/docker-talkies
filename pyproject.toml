@@ -44,3 +44,12 @@ packages = ["src/talkies"]
 # Supply-chain defense: only install pkg versions older than `exclude-newer`.
 # Bumped by `make pkg-*` targets before any dep mutation. UTC midnight.
 exclude-newer = "2026-05-28T00:00:00Z"
+
+[tool.mypy]
+# The dev/lint image is deliberately light (python + uv + lint tools only —
+# see Makefile). None of the runtime deps (fastapi/pydantic/httpx/mcp) nor the
+# prod-only ML stack (torch/numpy/nemo/faster_whisper/faster_qwen3_tts/kokoro/
+# onnxruntime) are installed there, so mypy can't resolve their imports.
+# Ignore the missing third-party stubs; mypy still type-checks all first-party
+# code (our annotations, signatures, return types) against each other.
+ignore_missing_imports = true

@@ -47,10 +47,14 @@ def _probe_channels(in_path: str) -> int:
     """
     cmd = [
         "ffprobe",
-        "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=channels",
-        "-of", "json",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=channels",
+        "-of",
+        "json",
         in_path,
     ]
     proc = subprocess.run(cmd, capture_output=True, timeout=30)
@@ -86,17 +90,24 @@ def to_wav_16k_mono(raw_bytes: bytes, original_filename: str) -> str:
     out_fd, out_path = tempfile.mkstemp(prefix="talkies-out-", suffix=".wav")
     os.close(out_fd)
     try:
-        _run_ffmpeg([
-            "ffmpeg",
-            "-loglevel", "error",
-            "-y",
-            "-i", in_path,
-            "-vn",
-            "-ac", "1",
-            "-ar", "16000",
-            "-acodec", "pcm_s16le",
-            out_path,
-        ])
+        _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                in_path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                out_path,
+            ]
+        )
     except Exception:
         try:
             os.unlink(out_path)
@@ -141,16 +152,33 @@ def to_wav_16k_split_lr(raw_bytes: bytes, original_filename: str) -> tuple[str, 
     try:
         # Single ffmpeg invocation produces both mono outputs via
         # `pan` filter: front-left -> L file, front-right -> R file.
-        _run_ffmpeg([
-            "ffmpeg",
-            "-loglevel", "error",
-            "-y",
-            "-i", in_path,
-            "-vn",
-            "-filter_complex", "[0:a]channelsplit=channel_layout=stereo[L][R]",
-            "-map", "[L]", "-ar", "16000", "-acodec", "pcm_s16le", l_path,
-            "-map", "[R]", "-ar", "16000", "-acodec", "pcm_s16le", r_path,
-        ])
+        _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                in_path,
+                "-vn",
+                "-filter_complex",
+                "[0:a]channelsplit=channel_layout=stereo[L][R]",
+                "-map",
+                "[L]",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                l_path,
+                "-map",
+                "[R]",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                r_path,
+            ]
+        )
     except Exception:
         for p in (l_path, r_path):
             try:

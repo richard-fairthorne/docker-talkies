@@ -31,9 +31,7 @@ def _ct2_compute_type(device: str) -> str:
 
 
 class WhisperBackend:
-    def __init__(
-        self, model_id: str, repo: str, model_path: Path, device: str
-    ) -> None:
+    def __init__(self, model_id: str, repo: str, model_path: Path, device: str) -> None:
         self.model_id = model_id
         self.repo = repo
         self.model_path = model_path
@@ -80,7 +78,7 @@ class WhisperBackend:
         task: str,
         with_timestamps: bool = False,
     ) -> TranscribeResult:
-        del target_lang  # whisper transcribes in source language; AST not supported here
+        del target_lang  # source-language transcription only; no translation
         model = await self.get_model()
         async with self._lock:
             result = await asyncio.to_thread(
@@ -148,7 +146,9 @@ class WhisperBackend:
                     "text": seg.text,
                     "tokens": list(seg.tokens) if getattr(seg, "tokens", None) else [],
                     "avg_logprob": _f_or_none(getattr(seg, "avg_logprob", None)),
-                    "compression_ratio": _f_or_none(getattr(seg, "compression_ratio", None)),
+                    "compression_ratio": _f_or_none(
+                        getattr(seg, "compression_ratio", None)
+                    ),
                     "no_speech_prob": _f_or_none(getattr(seg, "no_speech_prob", None)),
                     "temperature": _f_or_none(getattr(seg, "temperature", None)) or 0.0,
                 }
