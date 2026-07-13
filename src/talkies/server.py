@@ -1014,8 +1014,10 @@ def _verbose_json_response(
     task: str,
     granularities: list[str],
 ) -> dict[str, Any]:
-    """Build OpenAI-shaped verbose_json. Whisper-only fields are null-filled
-    so clients reading e.g. segment.avg_logprob don't crash.
+    """Build OpenAI-shaped verbose_json. Whisper-only fields (avg_logprob,
+    compression_ratio, no_speech_prob, temperature, tokens) are passed through
+    from the backend when available, falling back to None/empty for backends
+    that don't produce them.
 
     Note on granularities: OpenAI defaults to `segment` only, with `word`
     opt-in via `timestamp_granularities[]=word`. The LiteLLM proxy collapses
@@ -1034,11 +1036,11 @@ def _verbose_json_response(
             "start": seg["start"],
             "end": seg["end"],
             "text": seg.get("text", ""),
-            "tokens": [],
-            "temperature": 0.0,
-            "avg_logprob": None,
-            "compression_ratio": None,
-            "no_speech_prob": None,
+            "tokens": seg.get("tokens", []),
+            "temperature": seg.get("temperature", 0.0),
+            "avg_logprob": seg.get("avg_logprob"),
+            "compression_ratio": seg.get("compression_ratio"),
+            "no_speech_prob": seg.get("no_speech_prob"),
         }
         if "channel" in seg:
             item["channel"] = seg["channel"]
