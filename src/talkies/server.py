@@ -28,6 +28,11 @@ from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote
 
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
@@ -136,6 +141,37 @@ async def _idle_sweeper() -> None:
 
 
 _sweeper_task: asyncio.Task[None] | None = None
+_async_job_sweeper_task: asyncio.Task[None] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Async transcription job store
+# ---------------------------------------------------------------------------
+
+_ASYNC_JOB_TTL_SECONDS = 3600
+_ASYNC_JOB_SWEEPER_INTERVAL = 300
+
+_jobs: dict[str, dict[str, Any]] = {}
+
+
+async def _async_job_sweeper() -> None:
+    """Remove completed/failed jobs older than _ASYNC_JOB_TTL_SECONDS."""
+    while True:
+        try:
+            await asyncio.sleep(_ASYNC_JOB_SWEEPER_INTERVAL)
+            now = time.time()
+            expired = [
+                jid for jid, job in _jobs.items()
+                if job.get("completed_at")
+                and (now - job["completed_at"]) > _ASYNC_JOB_TTL_SECONDS
+            ]
+            for jid in expired:
+                del _jobs[jid]
+                log.debug("async job sweeper: removed expired job %s", jid)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("async job sweeper iteration failed")
 
 
 # Forward-declared so _lifespan can drive its session_manager.run() — the
@@ -167,20 +203,24 @@ async def _lifespan(_app: FastAPI):
         except Exception:  # noqa: BLE001
             log.exception("preload %s failed", model_id)
 
-    global _sweeper_task
+    global _sweeper_task, _async_job_sweeper_task
     _sweeper_task = asyncio.create_task(_idle_sweeper(), name="talkies-sweeper")
+    _async_job_sweeper_task = asyncio.create_task(
+        _async_job_sweeper(), name="talkies-async-job-sweeper"
+    )
     try:
         # MCP's streamable HTTP transport needs its session manager
         # running for the lifetime of the app.
         async with MCP_SERVER.session_manager.run():
             yield
     finally:
-        if _sweeper_task is not None:
-            _sweeper_task.cancel()
-            try:
-                await _sweeper_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (_sweeper_task, _async_job_sweeper_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 app = FastAPI(
@@ -687,6 +727,173 @@ async def transcribe(
             },
         )
     return _wrap_payload(payload, fmt=fmt)
+
+
+@app.post("/v1/audio/transcriptions/async")
+async def transcribe_async(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    model: str = Form(...),
+    language: str | None = Form(default=None),
+    response_format: str = Form(default="json"),
+    diarization: str | None = Form(default=None),
+    timestamp_granularities: list[str] = Form(
+        default=[], alias="timestamp_granularities[]"
+    ),
+) -> JSONResponse:
+    has_upload = file is not None and (file.filename or "") != ""
+    has_path = file_path is not None and file_path.strip() != ""
+    if has_upload == has_path:
+        raise HTTPException(
+            status_code=400,
+            detail="must specify exactly one of `file` (multipart upload) "
+            "or `file_path` (path under /v1/files)",
+        )
+
+    if model not in BACKENDS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown model {model!r}; configured: {list(BACKENDS.keys())}",
+        )
+    if not is_asr_backend(BACKENDS[model]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"model {model!r} is not an ASR model — try /v1/audio/speech",
+        )
+
+    do_diarize = _parse_diarization(diarization)
+
+    if has_upload:
+        assert file is not None
+        raw = await file.read()
+        if len(raw) > config.MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"upload too large ({len(raw)} bytes > {config.MAX_UPLOAD_BYTES})",
+            )
+        original_name = file.filename or "audio"
+    else:
+        assert file_path is not None
+        try:
+            raw, original_name = await load_audio_from_path(file_path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (downloads_mod.DownloadError, files_mod.FilePathError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    suffix = Path(original_name).suffix or ".wav"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="talkies_async_")
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+        "completed_at": None,
+        "tmp_path": tmp_path,
+    }
+
+    fmt = (response_format or "json").lower()
+    asyncio.create_task(
+        _process_async_job(
+            job_id, tmp_path, original_name, model, language, fmt, do_diarize,
+            timestamp_granularities,
+        ),
+        name=f"talkies-async-{job_id[:8]}",
+    )
+
+    log.info("async transcription job %s submitted (model=%s, %d bytes)", job_id, model, len(raw))
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "status": "pending"},
+    )
+
+
+async def _process_async_job(
+    job_id: str,
+    audio_path: str,
+    original_name: str,
+    model: str,
+    language: str | None,
+    fmt: str,
+    do_diarize: bool,
+    granularities: list[str],
+) -> None:
+    job = _jobs.get(job_id)
+    if job is None:
+        return
+
+    job["status"] = "processing"
+    log.info("async transcription job %s processing started", job_id)
+
+    try:
+        with open(audio_path, "rb") as f:
+            raw = f.read()
+
+        payload = await run_transcription_pipeline(
+            raw=raw,
+            original_name=original_name,
+            model=model,
+            language=language,
+            response_format=fmt,
+            do_diarize=do_diarize,
+            granularities=granularities,
+        )
+
+        wrapped = _wrap_payload(payload, fmt=fmt)
+        if isinstance(wrapped, Response):
+            job["result"] = {"text": payload if isinstance(payload, str) else payload.get("text", "")}
+        else:
+            job["result"] = wrapped
+
+        job["status"] = "completed"
+        job["completed_at"] = time.time()
+        log.info("async transcription job %s completed", job_id)
+    except KeyError:
+        job["status"] = "failed"
+        job["error"] = f"unknown model {model!r}"
+        job["completed_at"] = time.time()
+    except NotStereoError as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["completed_at"] = time.time()
+    except AudioConversionError as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["completed_at"] = time.time()
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["completed_at"] = time.time()
+        log.exception("async transcription job %s failed", job_id)
+    finally:
+        try:
+            os.unlink(audio_path)
+        except OSError:
+            pass
+
+
+@app.get("/v1/audio/transcriptions/jobs/{job_id}")
+async def get_transcription_job(job_id: str) -> JSONResponse:
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"job {job_id!r} not found (may have expired or pod was restarted)",
+        )
+
+    response: dict[str, Any] = {"job_id": job["job_id"], "status": job["status"]}
+
+    if job["status"] == "completed":
+        response["result"] = job["result"]
+    elif job["status"] == "failed":
+        response["error"] = job["error"]
+
+    return JSONResponse(content=response)
 
 
 async def run_transcription_pipeline(
