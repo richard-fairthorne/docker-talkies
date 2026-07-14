@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote
 
+import json
 import tempfile
 import time
 import uuid
@@ -151,23 +152,48 @@ _async_job_sweeper_task: asyncio.Task[None] | None = None
 _ASYNC_JOB_TTL_SECONDS = 3600
 _ASYNC_JOB_SWEEPER_INTERVAL = 300
 
-_jobs: dict[str, dict[str, Any]] = {}
+_JOBS_DIR = Path(os.environ.get("TALKIES_JOBS_DIR", "/data/jobs"))
+
+
+def _write_job(job_id: str, data: dict[str, Any]) -> None:
+    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _JOBS_DIR / f"{job_id}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, default=str))
+    tmp.rename(path)
+
+
+def _read_job(job_id: str) -> dict[str, Any] | None:
+    path = _JOBS_DIR / f"{job_id}.json"
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _delete_job(job_id: str) -> None:
+    try:
+        (_JOBS_DIR / f"{job_id}.json").unlink()
+    except OSError:
+        pass
 
 
 async def _async_job_sweeper() -> None:
-    """Remove completed/failed jobs older than _ASYNC_JOB_TTL_SECONDS."""
     while True:
         try:
             await asyncio.sleep(_ASYNC_JOB_SWEEPER_INTERVAL)
+            if not _JOBS_DIR.exists():
+                continue
             now = time.time()
-            expired = [
-                jid for jid, job in _jobs.items()
-                if job.get("completed_at")
-                and (now - job["completed_at"]) > _ASYNC_JOB_TTL_SECONDS
-            ]
-            for jid in expired:
-                del _jobs[jid]
-                log.debug("async job sweeper: removed expired job %s", jid)
+            for f in _JOBS_DIR.glob("*.json"):
+                try:
+                    job = json.loads(f.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                completed = job.get("completed_at")
+                if completed and (now - float(completed)) > _ASYNC_JOB_TTL_SECONDS:
+                    f.unlink(missing_ok=True)
+                    log.debug("async job sweeper: removed expired job %s", f.stem)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -787,7 +813,7 @@ async def transcribe_async(
         f.write(raw)
 
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {
+    _write_job(job_id, {
         "job_id": job_id,
         "status": "pending",
         "result": None,
@@ -795,7 +821,7 @@ async def transcribe_async(
         "created_at": time.time(),
         "completed_at": None,
         "tmp_path": tmp_path,
-    }
+    })
 
     fmt = (response_format or "json").lower()
     asyncio.create_task(
@@ -823,11 +849,12 @@ async def _process_async_job(
     do_diarize: bool,
     granularities: list[str],
 ) -> None:
-    job = _jobs.get(job_id)
+    job = _read_job(job_id)
     if job is None:
         return
 
     job["status"] = "processing"
+    _write_job(job_id, job)
     log.info("async transcription job %s processing started", job_id)
 
     try:
@@ -852,23 +879,28 @@ async def _process_async_job(
 
         job["status"] = "completed"
         job["completed_at"] = time.time()
+        _write_job(job_id, job)
         log.info("async transcription job %s completed", job_id)
     except KeyError:
         job["status"] = "failed"
         job["error"] = f"unknown model {model!r}"
         job["completed_at"] = time.time()
+        _write_job(job_id, job)
     except NotStereoError as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
         job["completed_at"] = time.time()
+        _write_job(job_id, job)
     except AudioConversionError as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
         job["completed_at"] = time.time()
+        _write_job(job_id, job)
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
         job["completed_at"] = time.time()
+        _write_job(job_id, job)
         log.exception("async transcription job %s failed", job_id)
     finally:
         try:
@@ -879,7 +911,7 @@ async def _process_async_job(
 
 @app.get("/v1/audio/transcriptions/jobs/{job_id}")
 async def get_transcription_job(job_id: str) -> JSONResponse:
-    job = _jobs.get(job_id)
+    job = _read_job(job_id)
     if job is None:
         raise HTTPException(
             status_code=404,
