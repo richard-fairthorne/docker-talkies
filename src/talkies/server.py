@@ -763,6 +763,8 @@ async def transcribe_async(
     language: str | None = Form(default=None),
     response_format: str = Form(default="json"),
     diarization: str | None = Form(default=None),
+    left_speaker: str | None = Form(default=None),
+    right_speaker: str | None = Form(default=None),
     timestamp_granularities: list[str] = Form(
         default=[], alias="timestamp_granularities[]"
     ),
@@ -827,7 +829,7 @@ async def transcribe_async(
     asyncio.create_task(
         _process_async_job(
             job_id, tmp_path, original_name, model, language, fmt, do_diarize,
-            timestamp_granularities,
+            timestamp_granularities, left_speaker, right_speaker,
         ),
         name=f"talkies-async-{job_id[:8]}",
     )
@@ -848,6 +850,8 @@ async def _process_async_job(
     fmt: str,
     do_diarize: bool,
     granularities: list[str],
+    left_speaker: str | None = None,
+    right_speaker: str | None = None,
 ) -> None:
     job = _read_job(job_id)
     if job is None:
@@ -869,6 +873,8 @@ async def _process_async_job(
             response_format=fmt,
             do_diarize=do_diarize,
             granularities=granularities,
+            left_speaker=left_speaker,
+            right_speaker=right_speaker,
         )
 
         wrapped = _wrap_payload(payload, fmt=fmt)
@@ -937,6 +943,8 @@ async def run_transcription_pipeline(
     response_format: str,
     do_diarize: bool,
     granularities: list[str] | None = None,
+    left_speaker: str | None = None,
+    right_speaker: str | None = None,
 ) -> str | dict[str, Any]:
     """Run the post-audio-resolution transcribe flow; return the raw payload.
 
@@ -1009,7 +1017,11 @@ async def run_transcription_pipeline(
                 except OSError:
                     pass
 
-        result = _merge_lr_results(l_res, r_res)
+        result = _merge_lr_results(
+            l_res, r_res,
+            left_label=left_speaker or "L",
+            right_label=right_speaker or "R",
+        )
         if duration is not None and result.duration is None:
             result.duration = duration
         if result.language is None:
@@ -1149,7 +1161,8 @@ def _tag_channel(items: list[dict], channel: str) -> list[dict]:
 
 
 def _merge_lr_results(
-    l_res: TranscribeResult, r_res: TranscribeResult
+    l_res: TranscribeResult, r_res: TranscribeResult,
+    left_label: str = "L", right_label: str = "R",
 ) -> TranscribeResult:
     """Combine left+right per-channel results into one diarized TranscribeResult.
 
@@ -1159,8 +1172,8 @@ def _merge_lr_results(
     channel (one transcript line per channel switch / segment), matching the
     text/srt/vtt output shape.
     """
-    l_segs = _tag_channel(list(l_res.segments), "L")
-    r_segs = _tag_channel(list(r_res.segments), "R")
+    l_segs = _tag_channel(list(l_res.segments), left_label)
+    r_segs = _tag_channel(list(r_res.segments), right_label)
     merged_segs = sorted(
         l_segs + r_segs, key=lambda s: (float(s.get("start") or 0), s["channel"])
     )
@@ -1205,9 +1218,9 @@ def _merge_lr_results(
         # text blocks, one per channel that produced output.
         parts: list[str] = []
         if l_res.text.strip():
-            parts.append(f"L: {l_res.text.strip()}")
+            parts.append(f"{left_label}: {l_res.text.strip()}")
         if r_res.text.strip():
-            parts.append(f"R: {r_res.text.strip()}")
+            parts.append(f"{right_label}: {r_res.text.strip()}")
         text = "\n".join(parts)
 
     duration = max(
