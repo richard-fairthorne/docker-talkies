@@ -10,6 +10,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU variant — pinned upstream image + local server.py overlay.
+          # Pushed as :latest and :<sha>.
+          - dockerfile: ./Dockerfile.overlay
+            tag_suffix: ""
+            cache_scope: cpu
+          # CUDA variant — same overlay pattern on top of upstream CUDA image.
+          # Pushed as :latest-cuda and :<sha>-cuda. Larger image (~12 GB)
+          # because it inherits upstream's full CUDA stack.
+          - dockerfile: ./Dockerfile.overlay-cuda
+            tag_suffix: "-cuda"
+            cache_scope: cuda
     steps:
       - uses: actions/checkout@v4
 
@@ -24,10 +39,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.overlay
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/richard-fairthorne/talkies:latest
-            ghcr.io/richard-fairthorne/talkies:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+            ghcr.io/richard-fairthorne/talkies:latest${{ matrix.tag_suffix }}
+            ghcr.io/richard-fairthorne/talkies:${{ github.sha }}${{ matrix.tag_suffix }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.cache_scope }}

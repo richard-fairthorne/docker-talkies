@@ -1,0 +1,11 @@
+# Overlay on top of upstream psyb0t/talkies CUDA image.
+# Same pattern as Dockerfile.overlay (CPU) — pull a pinned upstream image
+# and apply our local server.py. Used by .github/workflows/build.yml to
+# publish ghcr.io/richard-fairthorne/talkies:<sha>-cuda and :latest-cuda.
+#
+# Tag follows upstream (rolling) so CI picks up new CUDA base images
+# automatically. Pin to a sha256 digest if reproducibility becomes
+# important (e.g. for promoting a known-good build to production).
+FROM psyb0t/talkies:latest-cuda
+
+COPY src/talkies/server.py /app/src/talkies/server.py
