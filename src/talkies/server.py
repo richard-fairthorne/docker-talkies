@@ -246,6 +246,10 @@ async def _lifespan(_app: FastAPI):
         async with MCP_SERVER.session_manager.run():
             yield
     finally:
+        while _active_async_jobs > 0:
+            log.info("graceful shutdown: waiting for %d in-flight job(s)", _active_async_jobs)
+            await asyncio.sleep(1)
+
         for task in (_sweeper_task, _async_job_sweeper_task):
             if task is not None:
                 task.cancel()
