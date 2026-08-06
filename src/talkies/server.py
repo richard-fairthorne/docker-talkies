@@ -144,6 +144,12 @@ async def _idle_sweeper() -> None:
 _sweeper_task: asyncio.Task[None] | None = None
 _async_job_sweeper_task: asyncio.Task[None] | None = None
 
+# In-flight async transcription counter for concurrency limiting.
+# When _active_async_jobs >= TALKIES_MAX_CONCURRENT_ASYNC (default 1),
+# the POST /v1/audio/transcriptions/async endpoint returns 503 so the
+# callrecording-processor can release the job back to the pending queue.
+_active_async_jobs: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Async transcription job store
@@ -814,6 +820,20 @@ async def transcribe_async(
     with os.fdopen(fd, "wb") as f:
         f.write(raw)
 
+    global _active_async_jobs
+    _max_concurrent = int(os.environ.get("TALKIES_MAX_CONCURRENT_ASYNC", "1"))
+    if _active_async_jobs >= _max_concurrent:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "max concurrent async jobs reached", "busy": True},
+        )
+
+    _active_async_jobs += 1
+
     job_id = str(uuid.uuid4())
     _write_job(job_id, {
         "job_id": job_id,
@@ -853,8 +873,10 @@ async def _process_async_job(
     left_speaker: str | None = None,
     right_speaker: str | None = None,
 ) -> None:
+    global _active_async_jobs
     job = _read_job(job_id)
     if job is None:
+        _active_async_jobs -= 1
         return
 
     job["status"] = "processing"
@@ -909,6 +931,7 @@ async def _process_async_job(
         _write_job(job_id, job)
         log.exception("async transcription job %s failed", job_id)
     finally:
+        _active_async_jobs -= 1
         try:
             os.unlink(audio_path)
         except OSError:
