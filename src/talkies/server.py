@@ -149,6 +149,7 @@ _async_job_sweeper_task: asyncio.Task[None] | None = None
 # the POST /v1/audio/transcriptions/async endpoint returns 503 so the
 # callrecording-processor can release the job back to the pending queue.
 _active_async_jobs: int = 0
+_shutting_down: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +247,12 @@ async def _lifespan(_app: FastAPI):
         async with MCP_SERVER.session_manager.run():
             yield
     finally:
+        global _shutting_down
+        _shutting_down = True
+        log.info("graceful shutdown: rejecting new jobs, waiting for %d in-flight", _active_async_jobs)
+
         while _active_async_jobs > 0:
-            log.info("graceful shutdown: waiting for %d in-flight job(s)", _active_async_jobs)
+            log.info("graceful shutdown: %d in-flight job(s) remaining", _active_async_jobs)
             await asyncio.sleep(1)
 
         for task in (_sweeper_task, _async_job_sweeper_task):
@@ -666,6 +671,11 @@ async def transcribe(
     ),
     diarization: str | None = Form(default=None),
 ) -> Any:
+    if _shutting_down:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "server shutting down", "busy": True},
+        )
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
             "asr request",
@@ -825,6 +835,15 @@ async def transcribe_async(
         f.write(raw)
 
     global _active_async_jobs
+    if _shutting_down:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "server shutting down", "busy": True},
+        )
     _max_concurrent = int(os.environ.get("TALKIES_MAX_CONCURRENT_ASYNC", "1"))
     if _active_async_jobs >= _max_concurrent:
         try:
